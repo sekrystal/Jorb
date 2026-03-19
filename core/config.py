@@ -46,7 +46,7 @@ class Settings(BaseSettings):
     alert_empty_digest_seconds: int = 7200
     openai_enabled: bool = False
     openai_api_key: Optional[str] = None
-    openai_model: str = "gpt-5.4-mini"
+    openai_model: str = "gpt-5-mini"
     openai_timeout_seconds: int = 20
     openai_max_retries: int = 2
     x_bearer_token: Optional[str] = None

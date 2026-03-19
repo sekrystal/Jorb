@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from typing import Any, Optional
 
 import requests
@@ -11,6 +12,8 @@ from core.logging import get_logger
 
 logger = get_logger(__name__)
 OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses"
+OPENAI_WARNING_DEDUPE_SECONDS = 300
+_OPENAI_WARNING_CACHE: dict[str, float] = {}
 
 
 def ai_available() -> bool:
@@ -23,23 +26,25 @@ def _extract_response_text(payload: dict[str, Any]) -> Optional[str]:
         return payload["output_text"]
     for item in payload.get("output", []):
         for content in item.get("content", []):
+            if isinstance(content.get("json"), dict):
+                return json.dumps(content["json"])
             text = content.get("text")
             if isinstance(text, str) and text.strip():
                 return text
     return None
 
 
-def call_openai_json(schema_name: str, schema: dict[str, Any], system_prompt: str, user_prompt: str) -> Optional[dict[str, Any]]:
-    settings = get_settings()
-    if not ai_available():
-        return None
-
-    payload = {
-        "model": settings.openai_model,
-        "input": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
+def build_openai_request_payload(
+    schema_name: str,
+    schema: dict[str, Any],
+    system_prompt: str,
+    user_prompt: str,
+    model: str,
+) -> dict[str, Any]:
+    return {
+        "model": model,
+        "instructions": system_prompt,
+        "input": user_prompt,
         "text": {
             "format": {
                 "type": "json_schema",
@@ -49,13 +54,55 @@ def call_openai_json(schema_name: str, schema: dict[str, Any], system_prompt: st
             }
         },
     }
+
+
+def _extract_error_summary(response: requests.Response) -> str:
+    try:
+        payload = response.json()
+    except ValueError:
+        body = (response.text or "").strip()
+        return body[:300] if body else f"http_{response.status_code}"
+
+    error = payload.get("error")
+    if isinstance(error, dict):
+        message = error.get("message") or "unknown_error"
+        error_type = error.get("type")
+        param = error.get("param")
+        code = error.get("code")
+        bits = [str(part) for part in [message, f"type={error_type}" if error_type else None, f"param={param}" if param else None, f"code={code}" if code else None] if part]
+        return " | ".join(bits)[:300]
+    return json.dumps(payload)[:300]
+
+
+def _log_openai_warning_once(key: str, message: str) -> None:
+    now = time.time()
+    last_logged_at = _OPENAI_WARNING_CACHE.get(key)
+    if last_logged_at and now - last_logged_at < OPENAI_WARNING_DEDUPE_SECONDS:
+        return
+    _OPENAI_WARNING_CACHE[key] = now
+    logger.warning(message)
+
+
+def call_openai_json(schema_name: str, schema: dict[str, Any], system_prompt: str, user_prompt: str) -> Optional[dict[str, Any]]:
+    settings = get_settings()
+    if not ai_available():
+        return None
+
+    payload = build_openai_request_payload(
+        schema_name=schema_name,
+        schema=schema,
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        model=settings.openai_model,
+    )
     headers = {
         "Authorization": f"Bearer {settings.openai_api_key}",
         "Content-Type": "application/json",
     }
 
-    last_error: Exception | None = None
-    for _attempt in range(max(settings.openai_max_retries, 1)):
+    last_error_summary: str | None = None
+    attempts = max(settings.openai_max_retries, 1)
+    for _attempt in range(attempts):
         try:
             response = requests.post(
                 OPENAI_RESPONSES_URL,
@@ -63,17 +110,27 @@ def call_openai_json(schema_name: str, schema: dict[str, Any], system_prompt: st
                 json=payload,
                 timeout=settings.openai_timeout_seconds,
             )
-            response.raise_for_status()
+            status_code = getattr(response, "status_code", 200)
+            if status_code >= 400:
+                last_error_summary = _extract_error_summary(response)
+                response.raise_for_status()
             data = response.json()
             text = _extract_response_text(data)
             if not text:
-                logger.warning("OpenAI returned no structured text for %s", schema_name)
+                _log_openai_warning_once(
+                    f"{schema_name}:empty_text",
+                    f"OpenAI returned no structured text for {schema_name}; falling back to deterministic logic.",
+                )
                 return None
             return json.loads(text)
         except (requests.RequestException, ValueError, json.JSONDecodeError) as exc:
-            last_error = exc
+            if last_error_summary is None:
+                last_error_summary = str(exc)
 
-    logger.warning("OpenAI %s failed, falling back to deterministic logic: %s", schema_name, last_error)
+    _log_openai_warning_once(
+        f"{schema_name}:{last_error_summary}",
+        f"OpenAI {schema_name} failed, falling back to deterministic logic: {last_error_summary}",
+    )
     return None
 
 
@@ -174,4 +231,3 @@ def write_explanation_with_ai(context: dict[str, Any]) -> Optional[str]:
     if not result:
         return None
     return result.get("explanation")
-

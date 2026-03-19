@@ -38,6 +38,20 @@ def test_openai_wrapper_returns_none_when_disabled(monkeypatch) -> None:
     assert ai_judges.call_openai_json("demo", {"type": "object", "properties": {}, "required": [], "additionalProperties": False}, "system", "user") is None
 
 
+def test_openai_payload_uses_instructions_and_string_input() -> None:
+    payload = ai_judges.build_openai_request_payload(
+        schema_name="critic_judgment",
+        schema={"type": "object", "properties": {}, "required": [], "additionalProperties": False},
+        system_prompt="system prompt",
+        user_prompt="user prompt",
+        model="gpt-5-mini",
+    )
+    assert payload["model"] == "gpt-5-mini"
+    assert payload["instructions"] == "system prompt"
+    assert payload["input"] == "user prompt"
+    assert payload["text"]["format"]["type"] == "json_schema"
+
+
 def test_openai_wrapper_gracefully_handles_request_failure(monkeypatch) -> None:
     monkeypatch.setattr(
         ai_judges,
@@ -76,6 +90,42 @@ def test_openai_wrapper_parses_structured_json(monkeypatch) -> None:
     result = ai_judges.judge_fit_with_ai("deployment strategist", "Deployment Strategist", "Mercor", "Remote", "Deploy AI systems")
     assert result is not None
     assert result["classification"] == "strong_fit"
+
+
+def test_openai_wrapper_logs_error_summary_once_for_repeated_400s(monkeypatch) -> None:
+    monkeypatch.setattr(
+        ai_judges,
+        "get_settings",
+        lambda: Settings(database_url="sqlite:///:memory:", openai_enabled=True, openai_api_key="test-key", openai_max_retries=1),
+    )
+    ai_judges._OPENAI_WARNING_CACHE.clear()
+    logged: list[str] = []
+
+    class FakeResponse:
+        status_code = 400
+        text = '{"error":{"message":"Invalid schema","type":"invalid_request_error","param":"text.format","code":"invalid_json_schema"}}'
+
+        def json(self):
+            return {
+                "error": {
+                    "message": "Invalid schema",
+                    "type": "invalid_request_error",
+                    "param": "text.format",
+                    "code": "invalid_json_schema",
+                }
+            }
+
+        def raise_for_status(self):
+            raise requests.HTTPError("400 Client Error", response=self)
+
+    monkeypatch.setattr(ai_judges.requests, "post", lambda *args, **kwargs: FakeResponse())
+    monkeypatch.setattr(ai_judges.logger, "warning", lambda message: logged.append(message))
+
+    schema = {"type": "object", "properties": {"ok": {"type": "boolean"}}, "required": ["ok"], "additionalProperties": False}
+    assert ai_judges.call_openai_json("critic_judgment", schema, "system", "user") is None
+    assert ai_judges.call_openai_json("critic_judgment", schema, "system", "user") is None
+    assert len(logged) == 1
+    assert "Invalid schema" in logged[0]
 
 
 def test_runtime_control_supports_play_pause_and_run_once() -> None:
