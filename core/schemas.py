@@ -131,17 +131,6 @@ class LeadResponse(BaseModel):
     evidence_json: dict[str, Any]
 
 
-class LeadQueryOptions(BaseModel):
-    freshness_window_days: Optional[int] = 14
-    include_hidden: bool = False
-    include_unqualified: bool = False
-    lead_type: Optional[str] = None
-    only_saved: bool = False
-    only_applied: bool = False
-    status: Optional[str] = None
-    include_signal_only: bool = False
-
-
 class LeadsResponse(BaseModel):
     items: list[LeadResponse]
 
@@ -218,6 +207,22 @@ class AutonomyHealthResponse(BaseModel):
     suppressed_leads: int = 0
     due_follow_ups: int = 0
     scheduler_enabled: bool = False
+    runtime_state: str = "paused"
+    run_once_requested: bool = False
+    last_cycle_started_at: Optional[datetime] = None
+    last_successful_cycle_at: Optional[datetime] = None
+
+
+class RuntimeControlResponse(BaseModel):
+    run_state: Literal["running", "paused"] = "paused"
+    run_once_requested: bool = False
+    last_cycle_started_at: Optional[datetime] = None
+    last_successful_cycle_at: Optional[datetime] = None
+    last_cycle_summary: Optional[str] = None
+
+
+class RuntimeControlRequest(BaseModel):
+    action: Literal["play", "pause", "run_once"]
 
 
 class AutonomyDigestResponse(BaseModel):

@@ -118,19 +118,13 @@ The `Agent Activity` view shows:
 - target count or entity
 - result summary
 
-Manual controls:
+Runtime controls:
 
-- `Run scout now`
-- `Run resolver now`
-- `Run fit now`
-- `Run ranking now`
-- `Run critic now`
-- `Run tracker now`
-- `Run learning now`
-- `Run full pipeline now`
-- `Reset demo data`
+- `Play`
+- `Pause`
+- `Run once`
 
-The default demo boot keeps the scheduler off so the baseline does not mutate before the user does anything.
+The default demo boot keeps both autonomy and the scheduler off so the baseline does not mutate before the user does anything.
 
 If `ENABLE_SCHEDULER=true`, the local scheduler waits one interval before the first run, then executes the full pipeline on a loop. That keeps autonomous behavior available without mutating the demo immediately after reset.
 
@@ -155,7 +149,8 @@ Opportunity Scout now supports lightweight local autonomy without distributed in
 
 The loops can be:
 
-- run manually from `Agent Activity`
+- run continuously by the worker when runtime state is `running`
+- stepped once from `Agent Activity` with `Run once`
 - run on a schedule when `ENABLE_SCHEDULER=true`
 
 ## Learning Governance
@@ -399,8 +394,8 @@ Best demo story:
 The refresh loop is also real:
 
 - a clean reset starts with a stable baseline
-- `Run scout now` adds the next demo batch and marks new rows visibly in the table
-- `Run full pipeline now` advances scout, resolver, fit, ranker, critic, tracker, and learning in order
+- `Play` lets the worker keep cycling independently
+- `Run once` executes exactly one pipeline cycle while leaving the worker paused
 - investigations, query stats, watchlist items, and follow-up tasks update as the pipeline runs
 - the `change` column shows whether a row is new, updated, reranked, or suppressed
 
@@ -459,11 +454,15 @@ DATABASE_URL=sqlite:///./opportunity_scout.db
 
 The example env keeps `ENABLE_SCHEDULER=false` by default so a fresh demo reset stays stable until you run agents manually.
 
+It also keeps `AUTONOMY_ENABLED=false` and `GREENHOUSE_ENABLED=false` by default so first local bring-up is intentionally safe and idle.
+
 To opt into local autonomy:
 
 ```bash
+AUTONOMY_ENABLED=true
+GREENHOUSE_ENABLED=true
 ENABLE_SCHEDULER=true
-SCHEDULER_INTERVAL_SECONDS=60
+SYNC_INTERVAL_SECONDS=60
 SCHEDULER_INITIAL_DELAY_SECONDS=60
 SCHEDULER_MAX_CYCLES=0
 ```
@@ -493,8 +492,8 @@ pytest
 4. Switch to `Saved` and `Applied` to show real workflow state.
 5. Open `Investigations` and show unresolved weak signals, confidence, attempts, and next recheck time.
 6. Open `Learning` and show source query stats, watchlist items, and the Mercor follow-up task.
-7. Open `Agent Activity` and run `Run scout now` to add a fresh new row.
-8. Run `Run full pipeline now` to show the next signal batch, investigation updates, and event log.
+7. Open `Agent Activity`, click `Run once`, and show the next cycle summary and activity updates.
+8. Click `Play` to let the worker continue independently, then `Pause` once new rows and investigation updates appear.
 9. Open `Profile`, upload a PDF, and show the extracted profile fields.
 10. Reveal hidden rows only if you want to prove stale and mismatched suppression.
 

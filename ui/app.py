@@ -42,7 +42,7 @@ SORT_OPTIONS = [
 ]
 
 FRESHNESS_ORDER = {"fresh": 0, "recent": 1, "stale": 2, "unknown": 3}
-FIT_ORDER = {"strong fit": 0, "stretch": 1, "unclear": 2, "overqualified": 3, "underqualified": 4}
+FIT_ORDER = {"strong fit": 0, "adjacent": 1, "stretch": 2, "unclear": 3, "overqualified": 4, "underqualified": 5}
 CONFIDENCE_ORDER = {"high": 0, "medium": 1, "low": 2}
 STATUS_ORDER = {status: index for index, status in enumerate(APPLICATION_STATUSES)}
 
@@ -113,9 +113,12 @@ def build_query(
     return "/leads?" + "&".join(params)
 
 
-def run_agent(agent: str) -> str:
-    result = fetch_json("/agents/run", method="POST", payload={"agent": agent})
-    return result["summary"]
+def get_runtime_control() -> dict[str, Any]:
+    return fetch_json("/runtime-control")
+
+
+def set_runtime_control(action: str) -> dict[str, Any]:
+    return fetch_json("/runtime-control", method="POST", payload={"action": action})
 
 
 def send_feedback(lead_id: int, action: str, pattern: Optional[str] = None) -> None:
@@ -305,6 +308,11 @@ def render_table(leads: list[dict[str, Any]], key: str, applied_view: bool = Fal
 def render_detail(lead: dict[str, Any], key: str) -> None:
     evidence = lead.get("evidence_json", {})
     agent_actions = evidence.get("agent_actions", [])
+    critic_status = evidence.get("critic_status", "unknown")
+    critic_reasons = evidence.get("critic_reasons", [])
+    liveness = evidence.get("liveness_evidence", {})
+    ai_fit = evidence.get("ai_fit_assessment") or {}
+    ai_critic = evidence.get("ai_critic_assessment") or {}
 
     st.divider()
     st.subheader(f"{lead['company_name']} — {lead['primary_title']}")
@@ -315,12 +323,14 @@ def render_detail(lead: dict[str, Any], key: str) -> None:
     summary[1].write(f"Freshness: `{lead['freshness_label']}`")
     summary[2].write(f"Fit: `{lead['qualification_fit_label']}`")
     summary[3].write(f"Confidence: `{lead['confidence_label']}`")
-    summary[4].write(f"Status: `{lead.get('current_status') or 'unsaved'}`")
+    summary[4].write(f"Critic: `{critic_status}`")
     summary[5].write(f"Last agent action: `{lead.get('last_agent_action') or 'none'}`")
     change_state = evidence.get("change_state")
     if change_state:
         st.caption(f"Change marker: {change_state}")
-    st.caption(f"Source: {lead.get('source_platform') or lead.get('source_type')} | URL: {lead.get('url') or 'none'}")
+    st.caption(
+        f"Source: {lead.get('source_platform') or lead.get('source_type')} | URL: {lead.get('url') or 'none'} | Application status: {lead.get('current_status') or 'unsaved'}"
+    )
 
     action_row = st.columns(6)
     if lead.get("url"):
@@ -353,9 +363,24 @@ def render_detail(lead: dict[str, Any], key: str) -> None:
         st.write(f"Source type: {lead['lead_type']}")
         st.write(f"Freshness context: {lead['freshness_label']}")
         st.write(f"Fit context: {lead['qualification_fit_label']}")
+        st.write(f"Critic decision: {critic_status}")
         st.write(f"Feedback influence: {', '.join(evidence.get('feedback_notes', [])) or 'no material feedback yet'}")
-        if evidence.get("suppression_reason"):
-            st.write(f"Suppression context: {evidence['suppression_reason']}")
+        if ai_fit:
+            st.write(f"AI fit assessment: {ai_fit.get('classification', 'unknown')}")
+            if ai_fit.get("reasons"):
+                st.caption("AI fit reasons: " + "; ".join(ai_fit["reasons"]))
+        if critic_reasons:
+            st.write(f"Critic reasons: {'; '.join(critic_reasons)}")
+        if ai_critic:
+            st.caption("AI critic: " + "; ".join(ai_critic.get("reasons", [])))
+        if liveness:
+            st.write(
+                "Liveness evidence: "
+                f"status={liveness.get('listing_status')}, "
+                f"freshness_days={liveness.get('freshness_days')}, "
+                f"expiration_confidence={liveness.get('expiration_confidence')}, "
+                f"http_status={liveness.get('http_status') or 'n/a'}"
+            )
         if evidence.get("resolution_story"):
             st.write("Resolution story:")
             for item in evidence["resolution_story"]:
@@ -471,19 +496,23 @@ def render_profile_tab(profile: dict[str, Any], learning: dict[str, Any]) -> Non
 
 def render_agent_activity_tab() -> None:
     st.subheader("Agent Activity")
-    st.caption("Run the pipeline manually and inspect the event log of what changed.")
+    st.caption("Control the autonomous worker and inspect what changed.")
 
     autonomy = fetch_json("/autonomy-status")
+    runtime = get_runtime_control()
     health = autonomy.get("health", {})
     digest = autonomy.get("digest", {})
-    summary = st.columns(5)
-    summary[0].metric("Last success", format_timestamp(health.get("last_successful_run_at")) or "never")
-    summary[1].metric("Open investigations", health.get("open_investigations", 0))
-    summary[2].metric("Suppressed leads", health.get("suppressed_leads", 0))
-    summary[3].metric("Due follow-ups", health.get("due_follow_ups", 0))
-    summary[4].metric("Scheduler", "enabled" if health.get("scheduler_enabled") else "disabled")
+    summary = st.columns(6)
+    summary[0].metric("Run state", runtime.get("run_state", "paused"))
+    summary[1].metric("Run once queued", "yes" if runtime.get("run_once_requested") else "no")
+    summary[2].metric("Last cycle start", format_timestamp(runtime.get("last_cycle_started_at")) or "never")
+    summary[3].metric("Last cycle success", format_timestamp(runtime.get("last_successful_cycle_at")) or "never")
+    summary[4].metric("Open investigations", health.get("open_investigations", 0))
+    summary[5].metric("Due follow-ups", health.get("due_follow_ups", 0))
     if health.get("last_failed_run_at"):
         st.caption(f"Last failed run: {format_timestamp(health.get('last_failed_run_at'))}")
+    if runtime.get("last_cycle_summary"):
+        st.caption(runtime["last_cycle_summary"])
 
     if digest.get("summary"):
         with st.expander("Latest run summary", expanded=True):
@@ -499,36 +528,16 @@ def render_agent_activity_tab() -> None:
             if digest.get("watchlist_changes"):
                 st.caption(f"Watchlist changes: {', '.join(digest['watchlist_changes'])}")
 
-    button_row = st.columns(5)
-    actions = [
-        ("Run scout now", "scout"),
-        ("Run resolver now", "resolver"),
-        ("Run ranking now", "ranker"),
-        ("Run full pipeline now", "full_pipeline"),
-        ("Reset demo data", "reset_demo"),
-    ]
-    for column, (label, agent) in zip(button_row, actions):
-        if column.button(label, use_container_width=True):
-            summary = run_agent(agent)
-            st.success(summary)
-            st.rerun()
-
-    second_row = st.columns(3)
-    if second_row[0].button("Run fit now", use_container_width=True):
-        st.success(run_agent("fit"))
+    controls = st.columns(3)
+    if controls[0].button("Play", use_container_width=True):
+        set_runtime_control("play")
         st.rerun()
-    if second_row[1].button("Run critic now", use_container_width=True):
-        st.success(run_agent("critic"))
+    if controls[1].button("Pause", use_container_width=True):
+        set_runtime_control("pause")
         st.rerun()
-    if second_row[2].button("Run tracker now", use_container_width=True):
-        st.success(run_agent("tracker"))
+    if controls[2].button("Run once", use_container_width=True):
+        set_runtime_control("run_once")
         st.rerun()
-
-    third_row = st.columns(2)
-    if third_row[0].button("Run learning now", use_container_width=True):
-        st.success(run_agent("learning"))
-        st.rerun()
-    third_row[1].caption("Scheduler is off by default in demo mode. Enable it in `.env` if you want autonomous background runs.")
 
     activity = fetch_json("/agent-activity")["items"]
     if not activity:
@@ -631,11 +640,11 @@ def render_autonomy_ops_tab() -> None:
     connector_rows = pd.DataFrame(payload.get("connector_health", []))
 
     top = st.columns(5)
-    top[0].metric("Scheduler", "enabled" if health.get("scheduler_enabled") else "disabled")
+    top[0].metric("Run state", health.get("runtime_state", "paused"))
     top[1].metric("Open investigations", health.get("open_investigations", 0))
     top[2].metric("Suppressed leads", health.get("suppressed_leads", 0))
     top[3].metric("Due follow-ups", health.get("due_follow_ups", 0))
-    top[4].metric("Last success", format_timestamp(health.get("last_successful_run_at")) or "never")
+    top[4].metric("Last success", format_timestamp(health.get("last_successful_cycle_at") or health.get("last_successful_run_at")) or "never")
     if health.get("last_failed_run_at"):
         st.warning(f"Last failed run: {format_timestamp(health.get('last_failed_run_at'))}")
 

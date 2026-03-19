@@ -271,6 +271,19 @@ class AgentRun(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
 
 
+class RuntimeControl(Base):
+    __tablename__ = "runtime_control"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_state: Mapped[str] = mapped_column(String(50), default="paused", index=True)
+    run_once_requested: Mapped[bool] = mapped_column(Boolean, default=False)
+    last_cycle_started_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    last_successful_cycle_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    last_cycle_summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
 class ConnectorHealth(Base):
     __tablename__ = "connector_health"
 

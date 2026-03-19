@@ -40,6 +40,8 @@ Then reload:
 sudo systemctl restart opportunity-scout-worker.service
 ```
 
+The worker runtime state in the database should also be left at `paused` until you intentionally resume it from the UI or API.
+
 ## Disable Greenhouse Only
 
 Edit `/etc/opportunity-scout/opportunity-scout.env`:
@@ -113,3 +115,6 @@ sudo -u oppscout env $(grep -v '^#' /etc/opportunity-scout/opportunity-scout.env
 6. Review latest digest:
    - it should show either a clear change summary or a stable no-op summary
 7. Review worker logs for repeated exceptions or transport failures.
+8. Confirm runtime state is what you expect:
+   - `paused` for cautious bring-up
+   - `running` only when you intentionally want unattended cycles

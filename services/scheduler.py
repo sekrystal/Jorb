@@ -7,7 +7,7 @@ from core.config import Settings, get_settings
 from core.logging import get_logger
 from core.db import SessionLocal
 from services.activity import log_agent_failure
-from services.pipeline import run_full_pipeline
+from services.worker_runtime import run_worker_cycle
 
 
 logger = get_logger(__name__)
@@ -41,7 +41,7 @@ class LocalScheduler:
         while not self._stop_event.is_set():
             try:
                 with SessionLocal() as session:
-                    run_full_pipeline(session=session)
+                    run_worker_cycle(session=session, settings=self.settings)
                     session.commit()
             except Exception as exc:  # pragma: no cover
                 logger.exception("Scheduler sync failed: %s", exc)

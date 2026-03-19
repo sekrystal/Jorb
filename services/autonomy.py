@@ -6,7 +6,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from core.config import Settings, get_settings
-from core.models import AgentRun, ConnectorHealth, DailyDigest, FollowUpTask, Investigation, Lead, RunDigest, WatchlistItem
+from core.models import AgentRun, ConnectorHealth, DailyDigest, FollowUpTask, Investigation, Lead, RunDigest, RuntimeControl
 from core.schemas import AutonomyDigestResponse, AutonomyHealthResponse, ConnectorHealthResponse, DailyDigestResponse
 
 
@@ -28,6 +28,7 @@ def build_autonomy_health(session: Session, settings: Settings | None = None) ->
     last_failure = session.scalar(
         select(AgentRun.created_at).where(AgentRun.status == "failed").order_by(AgentRun.created_at.desc()).limit(1)
     )
+    runtime = session.scalar(select(RuntimeControl).order_by(RuntimeControl.id.asc()))
     return AutonomyHealthResponse(
         last_successful_run_at=last_success,
         last_failed_run_at=last_failure,
@@ -35,6 +36,10 @@ def build_autonomy_health(session: Session, settings: Settings | None = None) ->
         suppressed_leads=suppressed_leads,
         due_follow_ups=due_follow_ups,
         scheduler_enabled=settings.enable_scheduler,
+        runtime_state=runtime.run_state if runtime else ("running" if settings.autonomy_enabled else "paused"),
+        run_once_requested=runtime.run_once_requested if runtime else False,
+        last_cycle_started_at=runtime.last_cycle_started_at if runtime else None,
+        last_successful_cycle_at=runtime.last_successful_cycle_at if runtime else None,
     )
 
 

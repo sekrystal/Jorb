@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 from functools import partial
+from collections import defaultdict
 from typing import Optional
 
 from sqlalchemy import func, select
@@ -14,10 +15,11 @@ from core.config import get_settings
 from core.models import Application, Investigation, Lead, Listing, RecheckQueue, Signal, SourceQuery
 from core.schemas import ListingRecord, LeadResponse, SignalRecord, StatsResponse, SyncResult
 from services.activity import append_lead_agent_trace
+from services.ai_judges import judge_critic_with_ai, judge_fit_with_ai
 from services.connectors_health import run_connector_fetch
 from services.explain import build_explanation
 from services.extract_signal import extract_many
-from services.freshness import classify_freshness_label, validate_listing
+from services.freshness import classify_freshness_label, has_expired_pattern, validate_listing
 from services.investigations import mark_investigation_attempt, upsert_investigation
 from services.learning import generate_follow_up_tasks, increment_query_stat, next_action_for_application
 from services.normalize import normalize_ashby_job, normalize_greenhouse_job
@@ -99,6 +101,225 @@ def _matching_listing_for_signal(listings: list[Listing], signal: Signal) -> Opt
     return None
 
 
+def _authoritative_listing_context(session: Session, lead: Lead) -> dict:
+    evidence = dict(lead.evidence_json or {})
+    listing = session.get(Listing, lead.listing_id) if lead.listing_id else None
+    page_text = ""
+    http_status = None
+    if listing:
+        metadata = dict(listing.metadata_json or {})
+        page_text = metadata.get("page_text", "")
+        http_status = metadata.get("http_status")
+    else:
+        page_text = evidence.get("page_text", "")
+        http_status = evidence.get("http_status")
+    return {
+        "listing": listing,
+        "url": (listing.url if listing else evidence.get("url")),
+        "posted_at": listing.posted_at if listing else None,
+        "freshness_days": listing.freshness_days if listing else evidence.get("freshness_days"),
+        "listing_status": listing.listing_status if listing else evidence.get("listing_status"),
+        "expiration_confidence": listing.expiration_confidence if listing else evidence.get("expiration_confidence", 0.0),
+        "description_text": listing.description_text if listing else "",
+        "page_text": page_text or "",
+        "http_status": http_status,
+    }
+
+
+def _duplicate_winner_context(session: Session, leads: list[Lead]) -> dict[int, str]:
+    freshness_order = {"fresh": 0, "recent": 1, "stale": 2, "unknown": 3}
+    lead_type_order = {"combined": 0, "listing": 1, "signal": 2}
+    duplicate_groups: dict[tuple, list[Lead]] = defaultdict(list)
+
+    for lead in leads:
+        context = _authoritative_listing_context(session, lead)
+        dedupe_key = (
+            lead.listing_id or None,
+            (context["url"] or "").lower(),
+            lead.company_name.lower(),
+            lead.primary_title.lower(),
+        )
+        duplicate_groups[dedupe_key].append(lead)
+
+    losers: dict[int, str] = {}
+    for grouped in duplicate_groups.values():
+        if len(grouped) <= 1:
+            continue
+        ordered = sorted(
+            grouped,
+            key=lambda lead: (
+                lead_type_order.get(lead.lead_type, 9),
+                freshness_order.get(lead.freshness_label, 9),
+                -int(lead.updated_at.timestamp()) if lead.updated_at else 0,
+                lead.id,
+            ),
+        )
+        winner = ordered[0]
+        for loser in ordered[1:]:
+            losers[loser.id] = f"Duplicate of {winner.company_name} / {winner.primary_title}"
+    return losers
+
+
+def evaluate_critic_decision(
+    session: Session,
+    lead: Lead,
+    profile,
+    freshness_window_days: Optional[int] = 14,
+    duplicate_losers: Optional[dict[int, str]] = None,
+) -> dict:
+    duplicate_losers = duplicate_losers or {}
+    context = _authoritative_listing_context(session, lead)
+    url = context["url"]
+    listing_status = context["listing_status"]
+    freshness_days = context["freshness_days"]
+    expiration_confidence = context["expiration_confidence"] or 0.0
+    page_text = context["page_text"]
+    description_text = context["description_text"]
+    http_status = context["http_status"]
+    reasons: list[str] = []
+    status = "visible"
+    suppression_category = "none"
+    ai_critic = None
+
+    if lead.id in duplicate_losers:
+        reasons.append(duplicate_losers[lead.id])
+        status = "suppressed"
+        suppression_category = "duplicate"
+
+    if lead.lead_type in {"listing", "combined"}:
+        if not context["listing"]:
+            reasons.append("Missing backing listing record")
+            status = "suppressed"
+            suppression_category = "non_live"
+        if not url or not str(url).startswith("http"):
+            reasons.append("Missing or invalid job URL")
+            status = "suppressed"
+            suppression_category = "broken"
+        if http_status in {404, 410}:
+            reasons.append(f"Job page returned HTTP {http_status}")
+            status = "suppressed"
+            suppression_category = "broken"
+        if has_expired_pattern(description_text, page_text):
+            reasons.append("Expired text pattern detected in job content")
+            status = "suppressed"
+            suppression_category = "expired"
+        if listing_status in {"expired", "suspected_expired"}:
+            reasons.append(f"Listing status is {listing_status}")
+            status = "suppressed"
+            suppression_category = "expired"
+        elif listing_status != "active":
+            if freshness_days is not None and freshness_days <= 3 and expiration_confidence < 0.2:
+                reasons.append("Listing is recent but liveness is still uncertain")
+                status = "uncertain"
+                suppression_category = "uncertain"
+            else:
+                reasons.append(f"Listing status is {listing_status or 'unknown'}")
+                status = "uncertain"
+                suppression_category = "uncertain"
+        if freshness_days is None:
+            reasons.append("No reliable posted date found")
+            status = "uncertain"
+            suppression_category = "uncertain"
+        elif freshness_window_days is not None and freshness_days > freshness_window_days:
+            reasons.append(f"Freshness exceeded the default {freshness_window_days}-day window")
+            status = "suppressed"
+            suppression_category = "stale"
+        if lead.confidence_label == "low":
+            reasons.append("Confidence is too low for default surfaced listings")
+            status = "uncertain"
+            suppression_category = "uncertain"
+        ai_critic = judge_critic_with_ai(
+            title=lead.primary_title,
+            company_name=lead.company_name,
+            description_text=description_text,
+            listing_status=listing_status,
+            freshness_days=freshness_days,
+            page_text=page_text,
+            url=url,
+        )
+        if ai_critic and status == "visible" and ai_critic.get("quality_assessment") in {"uncertain", "stale", "suppress"}:
+            reasons.append(f"AI critic flagged: {'; '.join(ai_critic.get('reasons', []))}")
+            status = "uncertain"
+            suppression_category = "uncertain"
+
+    if lead.qualification_fit_label in {"underqualified", "overqualified"}:
+        reasons.append(f"Qualification fit is {lead.qualification_fit_label}")
+        status = "hidden"
+        suppression_category = "qualification"
+
+    if (lead.score_breakdown_json or {}).get("composite", 0.0) < profile.minimum_fit_threshold:
+        reasons.append("Composite fit is below the candidate threshold")
+        status = "hidden"
+        suppression_category = "low_fit"
+
+    if lead.company_name.lower() in [item.lower() for item in (profile.excluded_companies_json or [])]:
+        reasons.append("Company is muted in the candidate profile")
+        status = "hidden"
+        suppression_category = "user_suppressed"
+
+    if lead.lead_type == "signal":
+        signal = session.get(Signal, lead.signal_id) if lead.signal_id else None
+        if signal and signal.signal_status in {"needs_recheck", "resolved_no_listing"}:
+            status = "investigation"
+            reasons = reasons or ["Weak signal is under investigation without a confirmed active listing"]
+            suppression_category = "investigation"
+        elif status == "visible":
+            status = "uncertain"
+            reasons = reasons or ["Signal-only lead requires explicit opt-in"]
+            suppression_category = "uncertain"
+
+    if status == "visible":
+        reasons = ["Passed freshness, liveness, duplicate, and qualification gates"]
+
+    return {
+        "status": status,
+        "visible": status == "visible",
+        "reasons": reasons,
+        "suppression_category": suppression_category,
+        "authoritative_url": url,
+        "listing_status": listing_status,
+        "freshness_days": freshness_days,
+        "posted_at": context["posted_at"],
+        "liveness_evidence": {
+            "listing_status": listing_status,
+            "freshness_days": freshness_days,
+            "expiration_confidence": round(expiration_confidence, 2),
+            "http_status": http_status,
+            "expired_pattern_detected": has_expired_pattern(description_text, page_text),
+        },
+        "ai_critic_assessment": ai_critic,
+    }
+
+
+def apply_critic_decision_to_lead(
+    session: Session,
+    lead: Lead,
+    profile,
+    freshness_window_days: Optional[int] = 14,
+    duplicate_losers: Optional[dict[int, str]] = None,
+) -> dict:
+    decision = evaluate_critic_decision(
+        session=session,
+        lead=lead,
+        profile=profile,
+        freshness_window_days=freshness_window_days,
+        duplicate_losers=duplicate_losers,
+    )
+    evidence = dict(lead.evidence_json or {})
+    evidence["critic_status"] = decision["status"]
+    evidence["critic_reasons"] = decision["reasons"]
+    evidence["suppression_reason"] = "; ".join(decision["reasons"]) if decision["status"] != "visible" else None
+    evidence["suppression_category"] = decision["suppression_category"]
+    evidence["liveness_evidence"] = decision["liveness_evidence"]
+    evidence["ai_critic_assessment"] = decision.get("ai_critic_assessment")
+    evidence["listing_status"] = decision["listing_status"]
+    evidence["freshness_days"] = decision["freshness_days"]
+    evidence["url"] = decision["authoritative_url"]
+    lead.evidence_json = evidence
+    lead.hidden = not decision["visible"]
+    return decision
+
+
 def _upsert_lead(
     session: Session,
     lead_type: str,
@@ -141,6 +362,29 @@ def _upsert_lead(
         evidence_count=len(evidence_json.get("snippets", [])),
         feedback_learning=feedback_learning,
     )
+    candidate_context = profile.raw_resume_text or (profile.extracted_summary_json or {}).get("summary", "")
+    ai_fit = judge_fit_with_ai(
+        profile_text=candidate_context,
+        title=title,
+        company_name=company_name,
+        location=location,
+        description_text=description_text,
+    )
+    displayed_fit_label = breakdown["qualification_fit_label"]
+    if ai_fit:
+        displayed_fit_label = {
+            "strong_fit": "strong fit",
+            "adjacent": "adjacent",
+            "stretch": "stretch",
+            "underqualified": "underqualified",
+            "overqualified": "overqualified",
+            "unclear": "unclear",
+        }.get(ai_fit.get("classification"), displayed_fit_label)
+        ai_matched_fields = ai_fit.get("matched_profile_fields", [])
+        if ai_matched_fields:
+            breakdown["matched_profile_fields"] = list(
+                dict.fromkeys(breakdown.get("matched_profile_fields", []) + ai_matched_fields)
+            )
 
     feedback_notes = (profile.extracted_summary_json or {}).get("learning", {}).get("feedback_notes", [])[-3:]
     uncertainty = None
@@ -155,26 +399,10 @@ def _upsert_lead(
         feedback_notes=feedback_notes,
         freshness_label=breakdown["freshness_label"],
         confidence_label=breakdown["confidence_label"],
+        candidate_context=candidate_context[:1000] if candidate_context else None,
+        fit_assessment=ai_fit,
         uncertainty=uncertainty,
     )
-
-    hidden = False
-    suppression_reason = None
-    if listing_status in {"expired", "suspected_expired"}:
-        hidden = True
-        suppression_reason = f"Listing status is {listing_status}"
-    if lead_type in {"listing", "combined"} and freshness_label in {"stale", "unknown"}:
-        hidden = True
-        suppression_reason = suppression_reason or f"Freshness is {freshness_label}"
-    if breakdown["qualification_fit_label"] in {"underqualified", "overqualified"}:
-        hidden = True
-        suppression_reason = suppression_reason or f"Qualification fit is {breakdown['qualification_fit_label']}"
-    if breakdown["composite"] < profile.minimum_fit_threshold:
-        hidden = True
-        suppression_reason = suppression_reason or "Composite fit fell below the profile threshold"
-    if company_name.lower() in [item.lower() for item in (profile.excluded_companies_json or [])]:
-        hidden = True
-        suppression_reason = suppression_reason or "Company is muted in the profile"
 
     score_breakdown = {key: value for key, value in breakdown.items() if key not in {"matched_profile_fields"}}
     evidence_json = dict(evidence_json)
@@ -190,7 +418,7 @@ def _upsert_lead(
             "source_platform": "x_demo" if source_type == "x" else source_type,
             "company_domain": company_domain,
             "url": listing_url,
-            "suppression_reason": suppression_reason,
+            "ai_fit_assessment": ai_fit,
         }
     )
     if lead_type == "combined" and signal and listing:
@@ -217,12 +445,12 @@ def _upsert_lead(
         "confidence_label": breakdown["confidence_label"],
         "freshness_label": breakdown["freshness_label"],
         "title_fit_label": breakdown["title_fit_label"],
-        "qualification_fit_label": breakdown["qualification_fit_label"],
+        "qualification_fit_label": displayed_fit_label,
         "explanation": explanation,
         "score_breakdown_json": score_breakdown,
         "evidence_json": evidence_json,
         "last_agent_action": "Resolver: surfaced lead",
-        "hidden": hidden,
+        "hidden": False,
     }
 
     if existing:
@@ -231,6 +459,7 @@ def _upsert_lead(
             if getattr(existing, key) != value:
                 setattr(existing, key, value)
                 material_changed = True
+        apply_critic_decision_to_lead(session, existing, profile)
         if material_changed:
             existing.updated_at = datetime.utcnow()
             append_lead_agent_trace(existing, "Resolver", "surfaced lead", f"Resolver refreshed {company_name} / {title}", change_state="updated")
@@ -239,6 +468,7 @@ def _upsert_lead(
     lead = Lead(**payload)
     session.add(lead)
     session.flush()
+    apply_critic_decision_to_lead(session, lead, profile)
     append_lead_agent_trace(lead, "Resolver", "surfaced lead", f"Resolver surfaced {company_name} / {title}", change_state="new")
     return lead, True
 
@@ -500,11 +730,21 @@ def list_leads(
     include_signal_only: bool = False,
 ) -> list[LeadResponse]:
     records = session.scalars(select(Lead).order_by(Lead.surfaced_at.desc(), Lead.rank_label.asc())).all()
+    profile = get_candidate_profile(session)
+    duplicate_losers = _duplicate_winner_context(session, records)
     items: list[LeadResponse] = []
     for lead in records:
         evidence = lead.evidence_json or {}
-        freshness_days = evidence.get("freshness_days")
-        listing_status = evidence.get("listing_status")
+        decision = evaluate_critic_decision(
+            session=session,
+            lead=lead,
+            profile=profile,
+            freshness_window_days=freshness_window_days,
+            duplicate_losers=duplicate_losers,
+        )
+        authoritative = _authoritative_listing_context(session, lead)
+        freshness_days = decision["freshness_days"]
+        listing_status = decision["listing_status"]
         source_type = evidence.get("source_type", lead.lead_type)
         application = session.scalar(select(Application).where(Application.lead_id == lead.id))
         saved = application is not None and application.date_saved is not None
@@ -523,18 +763,25 @@ def list_leads(
             continue
         if lead.lead_type == "signal" and lead_type != "signal" and not include_signal_only:
             continue
-        if not include_hidden and lead.hidden:
-            if include_unqualified and lead.qualification_fit_label in {"underqualified", "overqualified"}:
+        if not include_hidden and not decision["visible"]:
+            if lead.lead_type == "signal" and include_signal_only and decision["status"] in {"uncertain", "investigation"}:
+                pass
+            elif include_unqualified and decision["suppression_category"] == "qualification":
                 pass
             else:
                 continue
-        if not include_hidden and lead.lead_type in {"listing", "combined"}:
-            if listing_status in {"expired", "suspected_expired"}:
-                continue
-            if lead.freshness_label in {"stale", "unknown"}:
-                continue
         if freshness_window_days is not None and freshness_days is not None and freshness_days > freshness_window_days:
             continue
+
+        response_evidence = dict(evidence)
+        response_evidence["critic_status"] = decision["status"]
+        response_evidence["critic_reasons"] = decision["reasons"]
+        response_evidence["suppression_reason"] = "; ".join(decision["reasons"]) if decision["status"] != "visible" else None
+        response_evidence["suppression_category"] = decision["suppression_category"]
+        response_evidence["liveness_evidence"] = decision["liveness_evidence"]
+        response_evidence["listing_status"] = listing_status
+        response_evidence["freshness_days"] = freshness_days
+        response_evidence["url"] = decision["authoritative_url"]
 
         items.append(
             LeadResponse(
@@ -542,11 +789,11 @@ def list_leads(
                 lead_type=lead.lead_type,
                 company_name=lead.company_name,
                 primary_title=lead.primary_title,
-                url=evidence.get("url"),
+                url=decision["authoritative_url"],
                 source_type=source_type,
                 listing_status=listing_status,
                 freshness_days=freshness_days,
-                posted_at=session.get(Listing, lead.listing_id).posted_at if lead.listing_id else None,
+                posted_at=decision["posted_at"],
                 surfaced_at=lead.surfaced_at,
                 rank_label=lead.rank_label,
                 confidence_label=lead.confidence_label,
@@ -565,9 +812,9 @@ def list_leads(
                 follow_up_due=follow_up_due,
                 explanation=lead.explanation,
                 last_agent_action=lead.last_agent_action,
-                hidden=lead.hidden,
+                hidden=not decision["visible"],
                 score_breakdown_json=lead.score_breakdown_json or {},
-                evidence_json=evidence,
+                evidence_json=response_evidence,
             )
         )
     rank_order = {"strong": 0, "medium": 1, "weak": 2}

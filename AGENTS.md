@@ -14,6 +14,7 @@ Any code agent working in this repo must preserve these product truths:
 - strict freshness filtering
 - working PDF resume parsing
 - editable candidate profile
+- deterministic runtime control for worker autonomy
 - clean distinction between `signals`, `listings`, and `leads`
 - save-for-later and application tracking
 - Clay-like, table-first workbench UI
@@ -40,6 +41,7 @@ Expected agent flow:
 - Never claim live access or source validation that does not exist.
 - Keep seeded demo data fresh, legible, and relevant to the target profile.
 - Hide expired, stale, underqualified, and overqualified leads by default.
+- Keep Critic as the final visibility gate; Ranker may order visible leads but must not override suppression.
 - Every surfaced lead must be explainable in plain language.
 - If a fix changes behavior, update the relevant documentation or agent artifacts in the same pass.
 
@@ -68,4 +70,3 @@ A task is only complete when all of the following are true:
 ## Agent Assets
 
 Repo-local prompts, skills, tasks, and reports live in [`agent_system/`](/Users/samuelkrystal/Huntr/opportunity-scout/agent_system).
-

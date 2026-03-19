@@ -11,6 +11,8 @@ from core.schemas import (
     AutonomyStatusResponse,
     InvestigationsResponse,
     LearningViewResponse,
+    RuntimeControlRequest,
+    RuntimeControlResponse,
 )
 from scripts.seed_demo_data import main as seed_demo_main
 from services.activity import list_agent_activities, log_agent_failure
@@ -28,6 +30,7 @@ from services.pipeline import (
     run_tracker_agent,
 )
 from services.profile import get_candidate_profile
+from services.runtime_control import get_runtime_control, runtime_control_payload, set_runtime_action
 
 
 router = APIRouter()
@@ -56,6 +59,18 @@ def get_autonomy_status(db: Session = Depends(get_db)) -> AutonomyStatusResponse
         daily_digest=build_daily_digest(db),
         connector_health=list_connector_health(db),
     )
+
+
+@router.get("/runtime-control", response_model=RuntimeControlResponse)
+def get_runtime_control_state(db: Session = Depends(get_db)) -> RuntimeControlResponse:
+    return runtime_control_payload(get_runtime_control(db))
+
+
+@router.post("/runtime-control", response_model=RuntimeControlResponse)
+def set_runtime_control_state(payload: RuntimeControlRequest, db: Session = Depends(get_db)) -> RuntimeControlResponse:
+    control = set_runtime_action(db, payload.action)
+    db.commit()
+    return runtime_control_payload(control)
 
 
 @router.post("/agents/run", response_model=AgentRunResponse)

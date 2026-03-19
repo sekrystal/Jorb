@@ -13,10 +13,9 @@ if str(ROOT) not in sys.path:
 from core.config import get_settings
 from core.db import SessionLocal, init_db
 from core.logging import configure_logging, get_logger
-from services.activity import log_agent_activity, log_agent_failure
+from services.activity import log_agent_failure
 from services.alerts import evaluate_alerts
-from services.ops import autonomy_enabled, get_runtime_connector_set
-from services.pipeline import run_full_pipeline
+from services.worker_runtime import run_worker_cycle
 
 
 logger = get_logger(__name__)
@@ -37,53 +36,9 @@ def run_worker_loop() -> None:
 
     while not STOP_REQUESTED:
         settings = get_settings()
-        if not autonomy_enabled(settings):
-            with SessionLocal() as session:
-                log_agent_activity(
-                    session,
-                    "Worker",
-                    "autonomy disabled",
-                    "Worker is idle because the global autonomy kill switch is active.",
-                    target_type="worker",
-                    target_count=0,
-                )
-                evaluate_alerts(session, settings=settings)
-                session.commit()
-            time.sleep(settings.worker_interval_seconds)
-            continue
-
-        source_mode, enabled_connectors, strict_live_connectors = get_runtime_connector_set(settings)
-        if not enabled_connectors:
-            with SessionLocal() as session:
-                log_agent_activity(
-                    session,
-                    "Worker",
-                    "connector disabled",
-                    "Worker is idle because no live connectors are enabled.",
-                    target_type="worker",
-                    target_count=0,
-                )
-                evaluate_alerts(session, settings=settings)
-                session.commit()
-            time.sleep(settings.worker_interval_seconds)
-            continue
-
         try:
             with SessionLocal() as session:
-                response = run_full_pipeline(
-                    session,
-                    source_mode=source_mode,
-                    enabled_connectors=enabled_connectors,
-                    strict_live_connectors=strict_live_connectors,
-                )
-                log_agent_activity(
-                    session,
-                    "Worker",
-                    "completed cycle",
-                    f"Worker cycle completed at {datetime.utcnow().isoformat()}. {response.summary}",
-                    target_type="worker",
-                    target_count=1,
-                )
+                outcome = run_worker_cycle(session, settings)
                 evaluate_alerts(session, settings=settings)
                 session.commit()
         except Exception as exc:  # pragma: no cover
@@ -96,7 +51,10 @@ def run_worker_loop() -> None:
 
         if STOP_REQUESTED:
             break
-        time.sleep(settings.worker_interval_seconds)
+        sleep_seconds = settings.worker_interval_seconds
+        if outcome.get("state") in {"paused", "disabled", "no_connectors"}:
+            sleep_seconds = min(settings.worker_interval_seconds, 5)
+        time.sleep(sleep_seconds)
 
 
 def main() -> None:

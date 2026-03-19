@@ -17,6 +17,11 @@ EXPIRED_PATTERNS = [
 ]
 
 
+def has_expired_pattern(*parts: str | None) -> bool:
+    haystack = " ".join(part or "" for part in parts).lower()
+    return any(pattern in haystack for pattern in EXPIRED_PATTERNS)
+
+
 def compute_freshness_days(posted_at: Optional[datetime]) -> Optional[int]:
     if not posted_at:
         return None
@@ -38,14 +43,12 @@ def classify_freshness_label(freshness_days: Optional[int]) -> str:
 def validate_listing(record: ListingRecord) -> ListingRecord:
     text = f"{record.description_text or ''} {(record.metadata_json or {}).get('page_text', '')}".lower()
     freshness_days = compute_freshness_days(record.posted_at)
-    listing_status = "active"
+    listing_status = "active" if freshness_days is not None else "unknown"
     expiration_confidence = 0.05
 
-    for pattern in EXPIRED_PATTERNS:
-        if pattern in text:
-            listing_status = "expired"
-            expiration_confidence = 0.98
-            break
+    if has_expired_pattern(text):
+        listing_status = "expired"
+        expiration_confidence = 0.98
 
     if listing_status != "expired" and freshness_days is not None and freshness_days > 30:
         listing_status = "suspected_expired"
@@ -56,6 +59,6 @@ def validate_listing(record: ListingRecord) -> ListingRecord:
         expiration_confidence = 0.99
 
     record.freshness_days = freshness_days
-    record.listing_status = listing_status if record.listing_status == "unknown" else record.listing_status
+    record.listing_status = listing_status
     record.expiration_confidence = max(record.expiration_confidence, expiration_confidence)
     return record

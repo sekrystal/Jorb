@@ -44,6 +44,11 @@ class Settings(BaseSettings):
     alert_duplicate_lead_threshold: int = 1
     alert_visible_stale_threshold: int = 1
     alert_empty_digest_seconds: int = 7200
+    openai_enabled: bool = False
+    openai_api_key: Optional[str] = None
+    openai_model: str = "gpt-5.4-mini"
+    openai_timeout_seconds: int = 20
+    openai_max_retries: int = 2
     x_bearer_token: Optional[str] = None
     greenhouse_board_tokens: str = ""
     ashby_org_keys: str = ""

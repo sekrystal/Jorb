@@ -5,6 +5,7 @@ from collections.abc import Iterable
 from typing import Optional
 
 from core.schemas import SignalRecord
+from services.ai_judges import interpret_signal_with_ai
 
 
 ROLE_PATTERNS = [
@@ -20,6 +21,7 @@ LOCATION_PATTERNS = ["sf", "san francisco", "nyc", "new york", "remote", "bay ar
 
 
 def extract_signal_fields(raw_text: str, source_url: str, author_handle: Optional[str] = None, query_text: str = "") -> SignalRecord:
+    ai_result = interpret_signal_with_ai(raw_text, source_url, author_handle=author_handle, query_text=query_text)
     lowered = raw_text.lower()
     role_guess = next((role for role in ROLE_PATTERNS if role in lowered), None)
     location_guess = next((location for location in LOCATION_PATTERNS if location in lowered), None)
@@ -44,6 +46,12 @@ def extract_signal_fields(raw_text: str, source_url: str, author_handle: Optiona
     if location_guess:
         confidence += 0.1
 
+    if ai_result:
+        company_guess = ai_result.get("company_guess") or company_guess
+        role_guess = ai_result.get("role_guess") or role_guess
+        location_guess = ai_result.get("location_guess") or location_guess
+        confidence = max(confidence, float(ai_result.get("hiring_confidence", confidence) or confidence))
+
     return SignalRecord(
         source_type="x",
         source_url=source_url,
@@ -53,8 +61,8 @@ def extract_signal_fields(raw_text: str, source_url: str, author_handle: Optiona
         role_guess=role_guess,
         location_guess=location_guess,
         hiring_confidence=min(confidence, 0.95),
-        signal_status="resolved" if company_guess else "weak",
-        metadata_json={"query_text": query_text},
+        signal_status=(ai_result or {}).get("signal_status") or ("resolved" if company_guess else "weak"),
+        metadata_json={"query_text": query_text, "ai_signal_reason": (ai_result or {}).get("reason")},
     )
 
 

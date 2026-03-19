@@ -15,7 +15,14 @@ from services.governance import evaluate_learning_governance
 from services.learning import add_watchlist_item, generate_follow_up_tasks
 from services.profile import get_candidate_profile
 from services.resolve_company import get_or_create_company
-from services.sync import _upsert_lead, _upsert_listing, _upsert_signal, sync_all
+from services.sync import (
+    _duplicate_winner_context,
+    _upsert_lead,
+    _upsert_listing,
+    _upsert_signal,
+    apply_critic_decision_to_lead,
+    sync_all,
+)
 
 
 DEMO_SCOUT_BATCHES: list[dict[str, list[dict]]] = [
@@ -395,18 +402,27 @@ def run_ranker_agent(
 
 def run_critic_agent(session: Session) -> AgentRunResponse:
     leads = session.scalars(select(Lead)).all()
+    profile = get_candidate_profile(session)
+    duplicate_losers = _duplicate_winner_context(session, leads)
     suppressed = 0
     kept = 0
+    uncertain = 0
     for lead in leads:
-        reason = "kept visible"
-        if lead.hidden:
-            suppressed += 1
-            reason = "suppressed stale, expired, or mismatched lead"
-        else:
+        decision = apply_critic_decision_to_lead(session, lead, profile, duplicate_losers=duplicate_losers)
+        if decision["visible"]:
             kept += 1
+            reason = "kept visible after liveness and fit review"
+        else:
+            suppressed += 1
+            if decision["status"] in {"uncertain", "investigation"}:
+                uncertain += 1
+            reason = f"{decision['status']} — {'; '.join(decision['reasons'])}"
         append_lead_agent_trace(lead, "Critic", reason, f"Critic {reason} for {lead.company_name} / {lead.primary_title}")
     suppressed_names = [f"{lead.company_name} / {lead.primary_title}" for lead in leads if lead.hidden][:4]
-    summary = f"Critic kept {kept} leads visible and suppressed {suppressed} leads. Suppressed: {', '.join(suppressed_names) if suppressed_names else 'none'}."
+    summary = (
+        f"Critic kept {kept} leads visible, suppressed {suppressed} leads, and marked {uncertain} as uncertain or investigative. "
+        f"Suppressed: {', '.join(suppressed_names) if suppressed_names else 'none'}."
+    )
     log_agent_activity(
         session,
         agent_name="Critic",
@@ -421,7 +437,7 @@ def run_critic_agent(session: Session) -> AgentRunResponse:
         "suppressed weak or stale rows",
         summary,
         suppressed,
-        metadata_json={"suppressed": suppressed_names, "visible_count": kept},
+        metadata_json={"suppressed": suppressed_names, "visible_count": kept, "uncertain_count": uncertain},
     )
     return AgentRunResponse(agent="critic", summary=summary)
 

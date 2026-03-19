@@ -74,12 +74,21 @@ Set at minimum:
 
 - `DATABASE_URL`
 - `DEMO_MODE=false`
-- `AUTONOMY_ENABLED=true`
-- `GREENHOUSE_ENABLED=true`
+- `AUTONOMY_ENABLED=false`
+- `GREENHOUSE_ENABLED=false`
 - `WORKER_INTERVAL_SECONDS=900`
 - `GREENHOUSE_BOARD_TOKENS=stripe,airtable`
 - `ALERTS_ENABLED=true`
 - `SLACK_WEBHOOK_URL=...`
+
+For first Linux bring-up, keep autonomy and Greenhouse disabled until:
+
+1. `scripts/init_db.py` succeeds
+2. API and UI both boot
+3. `/autonomy-status` returns clean health state
+4. you are ready to watch the first worker cycle
+
+Then enable `AUTONOMY_ENABLED=true` and `GREENHOUSE_ENABLED=true`.
 
 ## 8. Initialize The Database
 
