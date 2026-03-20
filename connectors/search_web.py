@@ -501,33 +501,52 @@ def build_search_queries(
         seen.add(query)
         queries.append(query)
 
-    for company in list(watchlist_items)[:4]:
-        for title in list(core_titles)[:2]:
-            add(f'site:job-boards.greenhouse.io "{company}" "{title}"')
-            add(f'site:jobs.ashbyhq.com "{company}" "{title}"')
-            add(f'"{company}" "{title}" startup careers greenhouse')
-            add(f'"{company}" "{title}" startup careers ashby')
-    for domain in list(preferred_domains)[:3]:
-        for title in list(core_titles)[:2]:
-            add(f'site:job-boards.greenhouse.io "{domain}" "{title}"')
-            add(f'site:jobs.ashbyhq.com "{domain}" "{title}"')
-            add(f'"{domain}" "{title}" startup jobs greenhouse')
-            add(f'"{domain}" "{title}" startup jobs ashby')
-    for title in list(adjacent_titles)[:3]:
-        add(f'site:job-boards.greenhouse.io "{title}"')
-        add(f'site:jobs.ashbyhq.com "{title}"')
-        add(f'"{title}" startup careers greenhouse')
-        add(f'"{title}" startup careers ashby')
-    for title in list(boosted_titles)[:3]:
-        add(f'site:job-boards.greenhouse.io "{title}" remote us')
-        add(f'site:jobs.ashbyhq.com "{title}" remote us')
-    for title in list(recent_titles)[:3]:
+    primary_titles = list(dict.fromkeys([*list(core_titles)[:3], *list(boosted_titles)[:2], *list(recent_titles)[:2]]))
+    secondary_titles = list(dict.fromkeys([*list(adjacent_titles)[:3], *list(recent_titles)[:2]]))
+    domain_themes = list(preferred_domains)[:3]
+    companies = list(watchlist_items)[:4]
+
+    for company in companies:
+        for title in primary_titles[:2]:
+            add(f'"{company}" "{title}" careers')
+            add(f'"{company}" "{title}" startup careers')
+            add(f'"{company}" "{title}" jobs')
+            add(f'"{company}" "{title}" greenhouse')
+            add(f'"{company}" "{title}" ashby')
+
+    for domain in domain_themes:
+        for title in primary_titles[:2]:
+            add(f'"{domain}" startup careers "{title}"')
+            add(f'"{domain}" startup jobs "{title}"')
+            add(f'AI startup careers "{title}"')
+            add(f'"{domain}" startup greenhouse "{title}"')
+            add(f'"{domain}" startup ashby "{title}"')
+
+    for title in primary_titles[:4]:
         add(f'"{title}" startup careers')
-        add(f'"{title}" remote us greenhouse')
+        add(f'"{title}" startup jobs')
+        add(f'"{title}" remote us careers')
+        add(f'"{title}" company careers')
+        add(f'"{title}" startup greenhouse')
+        add(f'"{title}" startup ashby')
+
+    for title in secondary_titles[:4]:
+        add(f'"{title}" startup careers')
+        add(f'"{title}" remote us careers')
+        add(f'"{title}" company careers')
+
     for family in list(role_families)[:3]:
         family_query = family.replace("_", " ")
-        add(f'"{family_query}" startup careers greenhouse')
-        add(f'"{family_query}" startup careers ashby')
+        add(f'"{family_query}" startup careers')
+        add(f'"{family_query}" startup jobs')
+        add(f'"{family_query}" remote us careers')
+        add(f'"{family_query}" startup greenhouse')
+        add(f'"{family_query}" startup ashby')
+
+    # Keep some ATS-direct probes, but make them a minority of the query mix.
+    for title in primary_titles[:2]:
+        add(f'site:job-boards.greenhouse.io "{title}"')
+        add(f'site:jobs.ashbyhq.com "{title}"')
     return queries
 
 

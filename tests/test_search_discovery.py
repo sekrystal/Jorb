@@ -6,6 +6,7 @@ from connectors.search_web import (
     _is_supported_job_surface,
     _parse_search_results_from_html,
     _surface_acceptance_reason,
+    build_search_queries,
     derive_search_results_from_extraction,
     extract_ats_identifiers_from_html,
 )
@@ -93,3 +94,21 @@ def test_supported_job_surface_accepts_careers_variants_and_blocks_aggregators()
 def test_surface_acceptance_reason_rejects_duckduckgo_self_links() -> None:
     assert _surface_acceptance_reason("https://duckduckgo.com/") == "provider_self_link"
     assert _surface_acceptance_reason("https://duckduckgo.com/help") == "provider_self_link"
+
+
+def test_build_search_queries_prefers_careers_mix_over_ats_direct_only() -> None:
+    queries = build_search_queries(
+        core_titles=["chief of staff"],
+        adjacent_titles=["business operations lead"],
+        preferred_domains=["ai"],
+        watchlist_items=["Acme"],
+        role_families=["operations"],
+        boosted_titles=["founding operations"],
+        recent_titles=["deployment strategist"],
+    )
+
+    assert any('"chief of staff" startup careers' in query for query in queries)
+    assert any('"chief of staff" startup jobs' in query for query in queries)
+    assert any('"Acme" "chief of staff" careers' in query for query in queries)
+    ats_direct_count = sum(1 for query in queries if query.startswith("site:job-boards.greenhouse.io") or query.startswith("site:jobs.ashbyhq.com"))
+    assert ats_direct_count < len(queries)

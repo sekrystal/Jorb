@@ -529,6 +529,7 @@ def _upsert_lead(
     listing_status: Optional[str],
     freshness_label: str,
     evidence_json: dict,
+    ai_fit_runtime_state: Optional[dict[str, int]] = None,
 ) -> tuple[Lead, bool]:
     existing = session.scalar(
         select(Lead).where(
@@ -555,13 +556,35 @@ def _upsert_lead(
         feedback_learning=feedback_learning,
     )
     candidate_context = profile.raw_resume_text or (profile.extracted_summary_json or {}).get("summary", "")
-    ai_fit = judge_fit_with_ai(
-        profile_text=candidate_context,
-        title=title,
-        company_name=company_name,
-        location=location,
-        description_text=description_text,
-    )
+    existing_ai_fit = None
+    if existing and existing.evidence_json:
+        existing_ai_fit = (existing.evidence_json or {}).get("ai_fit_assessment")
+    ai_fit = existing_ai_fit
+    if ai_fit is None:
+        remaining_ai_fit_calls = None
+        if ai_fit_runtime_state is not None:
+            remaining_ai_fit_calls = ai_fit_runtime_state.get("remaining", 0)
+        if remaining_ai_fit_calls is None or remaining_ai_fit_calls > 0:
+            ai_fit = judge_fit_with_ai(
+                profile_text=candidate_context,
+                title=title,
+                company_name=company_name,
+                location=location,
+                description_text=description_text,
+            )
+            if ai_fit_runtime_state is not None and ai_fit_runtime_state.get("remaining", 0) > 0:
+                ai_fit_runtime_state["remaining"] -= 1
+        else:
+            logger.info(
+                "[AI_FIT_BUDGET] %s",
+                {
+                    "title": title,
+                    "company": company_name,
+                    "source_type": source_type,
+                    "remaining": 0,
+                    "used_persisted_assessment": bool(existing_ai_fit),
+                },
+            )
     displayed_fit_label = breakdown["qualification_fit_label"]
     if ai_fit:
         displayed_fit_label = {
@@ -722,6 +745,7 @@ def sync_all(
     discovery_metrics: dict[str, dict[str, int]] = {}
     discovery_status: dict[str, object] = {}
     cycle_metrics: Counter[str] = Counter()
+    ai_fit_runtime_state = {"remaining": settings.ai_fit_max_calls_per_cycle}
 
     watchlist_values = [
         item.value
@@ -744,6 +768,13 @@ def sync_all(
         },
     )
     logger.info("[QUERY_DIVERSIFICATION] %s", {"queries": search_queries[:10]})
+    logger.info(
+        "[AI_FIT_BUDGET] %s",
+        {
+            "max_calls_per_cycle": settings.ai_fit_max_calls_per_cycle,
+            "remaining": ai_fit_runtime_state["remaining"],
+        },
+    )
     log_agent_activity(
         session,
         agent_name="Planner",
@@ -1220,6 +1251,12 @@ def sync_all(
                 "status": row.expansion_status,
             },
         )
+        cycle_metrics[f"{candidate.board_type}_expansion_attempts"] += 1
+        if result_count > 0:
+            cycle_metrics[f"{candidate.board_type}_expansion_successes"] += 1
+            cycle_metrics[f"{candidate.board_type}_listings_yielded"] += result_count
+        else:
+            cycle_metrics[f"{candidate.board_type}_empty_expansions"] += 1
         if provenance in {"discovered_existing", "discovered_new"} and result_count > 0:
             cycle_metrics[f"agent_discovered_{candidate.board_type}_expansion_successes"] += 1
         logger.info(
@@ -1367,6 +1404,7 @@ def sync_all(
                         if item["url"] == signal.source_url and item.get("query_text")
                     ],
                 },
+                ai_fit_runtime_state=ai_fit_runtime_state,
             )
             leads_created += 1 if created else 0
             leads_updated += 0 if created else 1
@@ -1431,6 +1469,7 @@ def sync_all(
                     "snippets": [signal.raw_text[:220]],
                     "source_queries": [query_text] if query_text else [],
                 },
+                ai_fit_runtime_state=ai_fit_runtime_state,
             )
             leads_created += 1 if created else 0
             leads_updated += 0 if created else 1
@@ -1492,6 +1531,7 @@ def sync_all(
                 "source_queries": query_texts,
                 "discovery_source": (listing.metadata_json or {}).get("discovery_source"),
             },
+            ai_fit_runtime_state=ai_fit_runtime_state,
         )
         leads_created += 1 if created else 0
         leads_updated += 0 if created else 1
@@ -1568,6 +1608,8 @@ def sync_all(
             },
         )
     learning_update = learning_agent(session, profile, settings=settings)
+    cycle_metrics["ai_fit_calls_remaining"] = ai_fit_runtime_state["remaining"]
+    cycle_metrics["ai_fit_calls_used"] = max(settings.ai_fit_max_calls_per_cycle - ai_fit_runtime_state["remaining"], 0)
     logger.info(
         "[LEARNING_UPDATE] %s",
         {

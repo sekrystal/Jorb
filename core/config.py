@@ -51,6 +51,7 @@ class Settings(BaseSettings):
     openai_timeout_seconds: int = 20
     openai_max_retries: int = 2
     enable_ai_readtime_critic: bool = False
+    ai_fit_max_calls_per_cycle: int = 40
     x_bearer_token: Optional[str] = None
     greenhouse_board_tokens: str = ""
     ashby_org_keys: str = ""

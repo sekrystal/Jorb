@@ -644,6 +644,54 @@ def test_list_leads_reuses_persisted_ai_critic_without_fresh_call(monkeypatch) -
     assert items[0].evidence_json["critic_status"] == "uncertain"
 
 
+def test_sync_all_caps_ai_fit_calls_per_cycle(monkeypatch) -> None:
+    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine, expire_on_commit=False)()
+    _seed_profile(session)
+
+    now = datetime.utcnow()
+    monkeypatch.setattr(sync_service, "get_candidate_profile", lambda _session: session.query(CandidateProfile).first())
+    monkeypatch.setattr(sync_service, "ensure_source_queries", lambda _session: [])
+    monkeypatch.setattr(sync_service, "generate_follow_up_tasks", lambda _session: 0)
+
+    call_counter = {"count": 0}
+
+    def fake_judge_fit_with_ai(**kwargs):
+        call_counter["count"] += 1
+        return {"classification": "strong_fit", "reasons": [], "matched_profile_fields": []}
+
+    monkeypatch.setattr(sync_service, "judge_fit_with_ai", fake_judge_fit_with_ai)
+
+    greenhouse_jobs = [
+        {
+            "id": f"gh-{index}",
+            "title": "Operations Lead",
+            "absolute_url": f"https://job-boards.greenhouse.io/capco-{index}/jobs/{index}",
+            "updated_at": now.isoformat(),
+            "first_published": now.isoformat(),
+            "location": {"name": "Remote, US"},
+            "content": "Own planning and cadence.",
+            "companyName": f"CapCo {index}",
+            "source_board_token": f"capco-{index}",
+        }
+        for index in range(3)
+    ]
+
+    def fake_run_connector_fetch(_session, connector_name, fetch_fn, date_fields=None):
+        if connector_name == "greenhouse":
+            return greenhouse_jobs, True, None
+        return [], False, None
+
+    monkeypatch.setattr(sync_service, "run_connector_fetch", fake_run_connector_fetch)
+    monkeypatch.setattr(sync_service, "get_settings", lambda: Settings(greenhouse_enabled=True, ai_fit_max_calls_per_cycle=1))
+
+    result = sync_service.sync_all(session, enabled_connectors={"greenhouse"})
+
+    assert call_counter["count"] == 1
+    assert result.discovery_status["cycle_metrics"]["ai_fit_calls_used"] == 1
+
+
 def test_default_leads_query_returns_timestamp_precision_and_recently_seen_rows_only() -> None:
     engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
     Base.metadata.create_all(engine)

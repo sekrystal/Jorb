@@ -44,6 +44,7 @@ def test_planner_agent_generates_queries_without_openai() -> None:
     assert plan["queries"]
     assert isinstance(plan["queries"], list)
     assert "queries" in plan
+    assert any("startup careers" in query for query in plan["queries"])
 
 
 def test_triage_agent_handles_ashby_candidate_without_ai() -> None:

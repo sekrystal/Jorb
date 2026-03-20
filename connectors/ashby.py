@@ -81,6 +81,7 @@ class AshbyConnector:
         jobs: list[dict] = []
         per_org_counts: dict[str, int] = {}
         empty_orgs: list[str] = []
+        org_statuses: dict[str, str] = {}
         for org in orgs:
             normalized_org = _normalize_ashby_org_key(org)
             logger.info("[ASHBY_FETCH_REQUEST] %s", {"requested_org": org, "normalized_org": normalized_org})
@@ -95,15 +96,27 @@ class AshbyConnector:
             )
             response.raise_for_status()
             payload = response.json()
-            org_jobs = payload.get("data", {}).get("jobBoard", {}).get("jobs", []) or []
+            job_board = payload.get("data", {}).get("jobBoard")
+            if job_board is None:
+                org_statuses[normalized_org] = "invalid_identifier"
+                per_org_counts[normalized_org] = 0
+                empty_orgs.append(normalized_org)
+                continue
+            org_jobs = job_board.get("jobs", []) or []
             per_org_counts[normalized_org] = len(org_jobs)
             if not org_jobs:
+                org_statuses[normalized_org] = "valid_identifier_empty_jobs"
                 empty_orgs.append(normalized_org)
+            else:
+                org_statuses[normalized_org] = "jobs_returned"
             for job in org_jobs:
                 job["companyName"] = normalized_org.replace("-", " ").title()
                 job["source_org_key"] = normalized_org
                 jobs.append(job)
-        logger.info("[ASHBY_FETCH_RESULTS] %s", {"per_org_counts": per_org_counts, "empty_orgs": empty_orgs[:10]})
+        logger.info(
+            "[ASHBY_FETCH_RESULTS] %s",
+            {"per_org_counts": per_org_counts, "empty_orgs": empty_orgs[:10], "org_statuses": org_statuses},
+        )
         return jobs
 
 

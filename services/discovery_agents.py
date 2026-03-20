@@ -88,8 +88,11 @@ def planner_agent(session: Session, profile: CandidateProfile, settings: Setting
     )
     for family in query_inputs["role_families"][:3]:
         for synonym in ROLE_SYNONYMS.get(family, []):
-            deterministic_queries.append(f'"{synonym}" startup careers ashby')
-            deterministic_queries.append(f'"{synonym}" startup careers greenhouse')
+            deterministic_queries.append(f'"{synonym}" startup careers')
+            deterministic_queries.append(f'"{synonym}" startup jobs')
+            deterministic_queries.append(f'"{synonym}" remote us careers')
+            deterministic_queries.append(f'"{synonym}" startup greenhouse')
+            deterministic_queries.append(f'"{synonym}" startup ashby')
     deterministic_queries = list(dict.fromkeys(deterministic_queries))
 
     ai_plan = plan_search_with_ai(
