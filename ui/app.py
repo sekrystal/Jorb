@@ -344,6 +344,32 @@ def lead_frame(leads: list[dict[str, Any]]) -> pd.DataFrame:
     return frame
 
 
+def recommendation_score_rows(lead: dict[str, Any]) -> pd.DataFrame:
+    score_payload = lead.get("score_breakdown_json") or {}
+    component_metrics = score_payload.get("component_metrics") or []
+    rows: list[dict[str, Any]] = []
+    for component in component_metrics:
+        rows.append(
+            {
+                "component": component.get("label") or component.get("key") or "",
+                "score": component.get("score"),
+                "semantics": component.get("semantics") or "",
+                "trace_inputs": ", ".join(component.get("trace_inputs") or []),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def recommendation_score_summary(lead: dict[str, Any]) -> str:
+    score_payload = lead.get("score_breakdown_json") or {}
+    final_score = score_payload.get("final_score", score_payload.get("composite"))
+    if final_score is None:
+        return "Recommendation score unavailable."
+    band = score_payload.get("recommendation_band") or lead.get("rank_label") or "unknown"
+    confidence = score_payload.get("confidence_label") or lead.get("confidence_label") or "unknown"
+    return f"Recommendation score: {float(final_score):.2f} | Band: {band} | Confidence: {confidence}"
+
+
 def filter_and_sort_table(table: pd.DataFrame, filters: dict[str, Any]) -> pd.DataFrame:
     if table.empty:
         return table
@@ -480,6 +506,8 @@ def render_table(leads: list[dict[str, Any]], key: str, applied_view: bool = Fal
 
 def render_detail(lead: dict[str, Any], key: str) -> None:
     evidence = lead.get("evidence_json", {})
+    score_payload = lead.get("score_breakdown_json") or {}
+    score_explanation = score_payload.get("explanation") or {}
     agent_actions = evidence.get("agent_actions", [])
     critic_status = evidence.get("critic_status", "unknown")
     critic_reasons = evidence.get("critic_reasons", [])
@@ -490,6 +518,7 @@ def render_detail(lead: dict[str, Any], key: str) -> None:
     st.divider()
     st.subheader(f"{lead['company_name']} — {lead['primary_title']}")
     st.write(lead.get("explanation") or "No explanation recorded.")
+    st.caption(recommendation_score_summary(lead))
 
     summary = st.columns(6)
     summary[0].write(f"Type: `{lead['lead_type']}`")
@@ -538,6 +567,14 @@ def render_detail(lead: dict[str, Any], key: str) -> None:
         st.write(f"Fit context: {lead['qualification_fit_label']}")
         st.write(f"Critic decision: {critic_status}")
         st.write(f"Feedback influence: {', '.join(evidence.get('feedback_notes', [])) or 'no material feedback yet'}")
+        if score_explanation:
+            st.write(f"Score explanation: {score_explanation.get('headline') or score_explanation.get('summary')}")
+            supporting_points = score_explanation.get("supporting_points") or []
+            if supporting_points:
+                st.write("Score context: " + " | ".join(supporting_points))
+        score_rows = recommendation_score_rows(lead)
+        if not score_rows.empty:
+            st.dataframe(score_rows, use_container_width=True, hide_index=True)
         if ai_fit:
             st.write(f"AI fit assessment: {ai_fit.get('classification', 'unknown')}")
             if ai_fit.get("reasons"):

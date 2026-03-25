@@ -261,6 +261,46 @@ def test_apply_target_role_selection_prioritizes_selected_role_in_structured_inp
     assert payload["extracted_summary_json"]["selected_target_role"] == "founding operations lead"
 
 
+def test_recommendation_score_helpers_surface_structured_summary_and_components() -> None:
+    lead = {
+        "rank_label": "strong",
+        "confidence_label": "high",
+        "score_breakdown_json": {
+            "final_score": 8.4,
+            "recommendation_band": "strong",
+            "confidence_label": "high",
+            "component_metrics": [
+                {
+                    "key": "freshness",
+                    "label": "Freshness",
+                    "score": 1.6,
+                    "semantics": "Rewards recent, still-live opportunities and penalizes stale ones.",
+                    "trace_inputs": ["freshness_label=fresh", "listing_status=active"],
+                },
+                {
+                    "key": "title_fit",
+                    "label": "Title alignment",
+                    "score": 2.4,
+                    "semantics": "Measures how closely the role title aligns with the candidate's target scope.",
+                    "trace_inputs": ["title_fit_label=core match"],
+                },
+            ],
+            "explanation": {
+                "headline": "Strong recommendation at 8.40 with high confidence.",
+                "summary": "Strong operator match with fresh, verified evidence.",
+                "supporting_points": ["Title fit: core match", "Qualification fit: strong fit"],
+            },
+        },
+    }
+
+    summary = ui_app.recommendation_score_summary(lead)
+    rows = ui_app.recommendation_score_rows(lead)
+
+    assert summary == "Recommendation score: 8.40 | Band: strong | Confidence: high"
+    assert rows["component"].tolist() == ["Freshness", "Title alignment"]
+    assert rows.loc[rows["component"] == "Freshness", "trace_inputs"].iloc[0] == "freshness_label=fresh, listing_status=active"
+
+
 def test_build_profile_update_payload_preserves_extracted_resume_draft_fields() -> None:
     saved_profile = {
         "profile_schema_version": "v1",

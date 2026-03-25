@@ -23,6 +23,231 @@ FeedbackAction = Literal[
 ]
 
 
+RECOMMENDATION_COMPONENT_SEMANTICS: dict[str, str] = {
+    "freshness": "Rewards recent, still-live opportunities and penalizes stale ones.",
+    "title_fit": "Measures how closely the role title aligns with the candidate's target scope.",
+    "role_family_fit": "Rewards role families that match the candidate's operating lanes.",
+    "domain_fit": "Rewards company domains that align with stated candidate preferences.",
+    "location_fit": "Rewards locations that match the candidate's preferred working geography.",
+    "stage_company_fit": "Rewards company stage or context signals that match the candidate's stated preferences.",
+    "source_quality": "Rewards sources with stronger verification and cleaner job normalization.",
+    "evidence_quality": "Rewards leads backed by multiple concrete evidence points.",
+    "novelty": "Rewards weak-signal or combined discovery paths that may expose less obvious opportunities.",
+    "negative_signals": "Captures penalties from stale status, muted companies, and exclusion rules.",
+    "feedback_title_boost": "Applies learned boosts from positive feedback on similar titles.",
+    "feedback_role_family_boost": "Applies learned boosts from positive feedback on similar role families.",
+    "feedback_domain_boost": "Applies learned boosts from positive feedback on similar company domains.",
+    "feedback_source_penalty": "Applies learned penalties to lower-value source types.",
+}
+
+RECOMMENDATION_COMPONENT_LABELS: dict[str, str] = {
+    "freshness": "Freshness",
+    "title_fit": "Title alignment",
+    "role_family_fit": "Role family alignment",
+    "domain_fit": "Domain alignment",
+    "location_fit": "Location alignment",
+    "stage_company_fit": "Stage alignment",
+    "source_quality": "Source quality",
+    "evidence_quality": "Evidence quality",
+    "novelty": "Novelty",
+    "negative_signals": "Negative signals",
+    "feedback_title_boost": "Feedback title boost",
+    "feedback_role_family_boost": "Feedback role-family boost",
+    "feedback_domain_boost": "Feedback domain boost",
+    "feedback_source_penalty": "Feedback source penalty",
+}
+
+RECOMMENDATION_COMPONENT_ORDER = [
+    "freshness",
+    "title_fit",
+    "role_family_fit",
+    "domain_fit",
+    "location_fit",
+    "stage_company_fit",
+    "source_quality",
+    "evidence_quality",
+    "novelty",
+    "negative_signals",
+    "feedback_title_boost",
+    "feedback_role_family_boost",
+    "feedback_domain_boost",
+    "feedback_source_penalty",
+]
+
+
+class RecommendationScoreComponent(BaseModel):
+    key: str
+    label: str
+    score: float
+    semantics: str
+    trace_inputs: list[str] = Field(default_factory=list)
+
+
+class RecommendationScoreExplanation(BaseModel):
+    headline: str
+    summary: str
+    supporting_points: list[str] = Field(default_factory=list)
+
+
+class RecommendationScoreSchema(BaseModel):
+    schema_version: str = "v1"
+    final_score: float = 0.0
+    recommendation_band: str = "weak"
+    confidence_label: str = "low"
+    title_fit_label: str = "unclear"
+    qualification_fit_label: str = "unclear"
+    role_family: str = "generalist"
+    component_metrics: list[RecommendationScoreComponent] = Field(default_factory=list)
+    trace_inputs: dict[str, Any] = Field(default_factory=dict)
+    explanation: RecommendationScoreExplanation
+
+
+def _format_trace_value(value: Any) -> str:
+    if isinstance(value, list):
+        return ", ".join(str(item) for item in value if item not in {None, ""}) or "none"
+    if value in {None, ""}:
+        return "none"
+    return str(value)
+
+
+def _component_trace_inputs(component_key: str, raw_score: dict[str, Any], evidence: dict[str, Any], labels: dict[str, Any]) -> list[str]:
+    trace_by_component = {
+        "freshness": [
+            f"freshness_label={_format_trace_value(labels.get('freshness_label'))}",
+            f"listing_status={_format_trace_value(evidence.get('listing_status'))}",
+            f"freshness_days={_format_trace_value(evidence.get('freshness_days'))}",
+        ],
+        "title_fit": [
+            f"title_fit_label={_format_trace_value(labels.get('title_fit_label'))}",
+            f"matched_profile_fields={_format_trace_value(evidence.get('matched_profile_fields'))}",
+        ],
+        "role_family_fit": [
+            f"role_family={_format_trace_value(raw_score.get('role_family'))}",
+            f"matched_profile_fields={_format_trace_value(evidence.get('matched_profile_fields'))}",
+        ],
+        "domain_fit": [
+            f"company_domain={_format_trace_value(evidence.get('company_domain'))}",
+        ],
+        "location_fit": [
+            f"location={_format_trace_value(evidence.get('location'))}",
+            f"location_scope={_format_trace_value(evidence.get('location_scope'))}",
+        ],
+        "stage_company_fit": [
+            f"feedback_notes={_format_trace_value(evidence.get('feedback_notes'))}",
+        ],
+        "source_quality": [
+            f"source_platform={_format_trace_value(evidence.get('source_platform') or evidence.get('source_type'))}",
+            f"source_lineage={_format_trace_value(evidence.get('source_lineage'))}",
+        ],
+        "evidence_quality": [
+            f"matched_profile_fields={_format_trace_value(evidence.get('matched_profile_fields'))}",
+            f"resolution_story={_format_trace_value(evidence.get('resolution_story'))}",
+        ],
+        "novelty": [
+            f"lead_type={_format_trace_value(evidence.get('lead_type'))}",
+            f"discovery_source={_format_trace_value(evidence.get('discovery_source'))}",
+        ],
+        "negative_signals": [
+            f"qualification_fit_label={_format_trace_value(labels.get('qualification_fit_label'))}",
+            f"listing_status={_format_trace_value(evidence.get('listing_status'))}",
+        ],
+        "feedback_title_boost": [
+            f"feedback_notes={_format_trace_value(evidence.get('feedback_notes'))}",
+        ],
+        "feedback_role_family_boost": [
+            f"role_family={_format_trace_value(raw_score.get('role_family'))}",
+            f"feedback_notes={_format_trace_value(evidence.get('feedback_notes'))}",
+        ],
+        "feedback_domain_boost": [
+            f"company_domain={_format_trace_value(evidence.get('company_domain'))}",
+            f"feedback_notes={_format_trace_value(evidence.get('feedback_notes'))}",
+        ],
+        "feedback_source_penalty": [
+            f"source_platform={_format_trace_value(evidence.get('source_platform') or evidence.get('source_type'))}",
+            f"feedback_notes={_format_trace_value(evidence.get('feedback_notes'))}",
+        ],
+    }
+    return [item for item in trace_by_component.get(component_key, []) if not item.endswith("=none")]
+
+
+def _build_recommendation_explanation(
+    raw_score: dict[str, Any],
+    component_metrics: list[dict[str, Any]],
+    explanation_text: str | None,
+    labels: dict[str, Any],
+) -> RecommendationScoreExplanation:
+    final_score = float(raw_score.get("final_score", raw_score.get("composite", 0.0)) or 0.0)
+    recommendation_band = str(raw_score.get("recommendation_band", raw_score.get("rank_label", "weak")) or "weak")
+    confidence_label = str(labels.get("confidence_label", raw_score.get("confidence_label", "low")) or "low")
+    top_positive = next((component for component in component_metrics if component["score"] > 0), None)
+    top_negative = next((component for component in reversed(component_metrics) if component["score"] < 0), None)
+    headline = f"{recommendation_band.title()} recommendation at {final_score:.2f} with {confidence_label} confidence."
+    summary_parts = [explanation_text or "Recommendation assembled from deterministic component metrics."]
+    if top_positive:
+        summary_parts.append(f"Top positive driver: {top_positive['label']} ({top_positive['score']:+.2f}).")
+    if top_negative:
+        summary_parts.append(f"Top negative driver: {top_negative['label']} ({top_negative['score']:+.2f}).")
+    supporting_points = [
+        f"Title fit: {labels.get('title_fit_label', raw_score.get('title_fit_label', 'unclear'))}",
+        f"Qualification fit: {labels.get('qualification_fit_label', raw_score.get('qualification_fit_label', 'unclear'))}",
+    ]
+    return RecommendationScoreExplanation(
+        headline=headline,
+        summary=" ".join(part.strip() for part in summary_parts if part and str(part).strip()),
+        supporting_points=supporting_points,
+    )
+
+
+def normalize_recommendation_score_schema(
+    raw_score: dict[str, Any] | None,
+    *,
+    explanation_text: str | None = None,
+    evidence: dict[str, Any] | None = None,
+    labels: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    raw_score = dict(raw_score or {})
+    evidence = dict(evidence or {})
+    labels = dict(labels or {})
+    evidence.setdefault("lead_type", evidence.get("lead_type"))
+
+    component_metrics: list[dict[str, Any]] = []
+    for key in RECOMMENDATION_COMPONENT_ORDER:
+        if key not in raw_score:
+            continue
+        component_metrics.append(
+            RecommendationScoreComponent(
+                key=key,
+                label=RECOMMENDATION_COMPONENT_LABELS.get(key, key.replace("_", " ").title()),
+                score=float(raw_score.get(key) or 0.0),
+                semantics=RECOMMENDATION_COMPONENT_SEMANTICS.get(key, "Contributes to the deterministic recommendation score."),
+                trace_inputs=_component_trace_inputs(key, raw_score, evidence, labels),
+            ).model_dump()
+        )
+
+    normalized = dict(raw_score)
+    normalized["schema_version"] = str(raw_score.get("schema_version") or "v1")
+    normalized["final_score"] = float(raw_score.get("final_score", raw_score.get("composite", 0.0)) or 0.0)
+    normalized["recommendation_band"] = str(raw_score.get("recommendation_band", raw_score.get("rank_label", "weak")) or "weak")
+    normalized["confidence_label"] = str(labels.get("confidence_label", raw_score.get("confidence_label", "low")) or "low")
+    normalized["title_fit_label"] = str(labels.get("title_fit_label", raw_score.get("title_fit_label", "unclear")) or "unclear")
+    normalized["qualification_fit_label"] = str(
+        labels.get("qualification_fit_label", raw_score.get("qualification_fit_label", "unclear")) or "unclear"
+    )
+    normalized["role_family"] = str(raw_score.get("role_family") or "generalist")
+    normalized["component_metrics"] = component_metrics
+    normalized["trace_inputs"] = {
+        "matched_profile_fields": list(evidence.get("matched_profile_fields") or []),
+        "feedback_notes": list(evidence.get("feedback_notes") or []),
+        "source_platform": evidence.get("source_platform") or evidence.get("source_type"),
+        "source_lineage": evidence.get("source_lineage"),
+        "listing_status": evidence.get("listing_status"),
+        "freshness_label": labels.get("freshness_label", raw_score.get("freshness_label")),
+    }
+    normalized["explanation"] = _build_recommendation_explanation(raw_score, component_metrics, explanation_text, labels).model_dump()
+    RecommendationScoreSchema(**normalized)
+    return normalized
+
+
 class SignalRecord(BaseModel):
     source_type: str
     source_url: str
@@ -230,6 +455,21 @@ class LeadResponse(BaseModel):
     hidden: bool
     score_breakdown_json: dict[str, Any]
     evidence_json: dict[str, Any]
+
+    @model_validator(mode="after")
+    def normalize_recommendation_score(self) -> "LeadResponse":
+        self.score_breakdown_json = normalize_recommendation_score_schema(
+            self.score_breakdown_json,
+            explanation_text=self.explanation,
+            evidence={**(self.evidence_json or {}), "lead_type": self.lead_type},
+            labels={
+                "freshness_label": self.freshness_label,
+                "confidence_label": self.confidence_label,
+                "title_fit_label": self.title_fit_label,
+                "qualification_fit_label": self.qualification_fit_label,
+            },
+        )
+        return self
 
 
 class LeadsResponse(BaseModel):

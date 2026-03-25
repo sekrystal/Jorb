@@ -86,6 +86,31 @@ DEMO_SCOUT_BATCHES: list[dict[str, list[dict]]] = [
 ]
 
 
+def recommendation_score_value(score_breakdown: dict | None) -> float:
+    score_breakdown = score_breakdown or {}
+    value = score_breakdown.get("final_score", score_breakdown.get("composite", 0.0))
+    try:
+        return float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def recommendation_component_value(score_breakdown: dict | None, component_key: str) -> float:
+    score_breakdown = score_breakdown or {}
+    if component_key in score_breakdown:
+        try:
+            return float(score_breakdown.get(component_key) or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+    for component in score_breakdown.get("component_metrics", []) or []:
+        if component.get("key") == component_key:
+            try:
+                return float(component.get("score") or 0.0)
+            except (TypeError, ValueError):
+                return 0.0
+    return 0.0
+
+
 def _mark_leads(session: Session, leads: list[Lead], agent_name: str, action: str, message_fn) -> None:
     for lead in leads:
         change_state = None
@@ -406,7 +431,7 @@ def run_ranker_agent(
         for lead in visible_all
     )
     visible_scores = [
-        float((lead.score_breakdown_json or {}).get("composite", 0.0))
+        recommendation_score_value(lead.score_breakdown_json)
         for lead in top_visible
     ]
     if visible_scores:
@@ -422,8 +447,8 @@ def run_ranker_agent(
             "[JOB_DEBUG] title=%s company=%s score=%s fit=%s source=%s",
             lead.primary_title,
             lead.company_name,
-            score_breakdown.get("composite"),
-            score_breakdown.get("title_fit"),
+            recommendation_score_value(score_breakdown),
+            recommendation_component_value(score_breakdown, "title_fit"),
             (lead.evidence_json or {}).get("source_platform", (lead.evidence_json or {}).get("source_type")),
         )
     for lead in top_visible[:5]:
@@ -449,8 +474,8 @@ def run_ranker_agent(
             {
                 "title": lead.primary_title,
                 "company": lead.company_name,
-                "score": (lead.score_breakdown_json or {}).get("composite"),
-                "fit": (lead.score_breakdown_json or {}).get("title_fit"),
+                "score": recommendation_score_value(lead.score_breakdown_json),
+                "fit": recommendation_component_value(lead.score_breakdown_json, "title_fit"),
                 "source": (lead.evidence_json or {}).get("source_platform", (lead.evidence_json or {}).get("source_type")),
             }
             for lead in top_visible[:5]
