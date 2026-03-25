@@ -750,6 +750,8 @@ def test_sync_all_persists_query_family_metrics(monkeypatch) -> None:
     assert query_family_metrics["ats_direct"]["accepted_results"] == 1
     assert query_family_metrics["ats_direct"]["candidate_conversions"] == 1
     assert query_family_metrics["ats_direct"]["selected_for_expansion"] == 1
+    assert query_family_metrics["ats_direct"]["zero_visible_yield_expansions"] == 1
+    assert query_family_metrics["ats_direct"]["visible_yield_count"] == 0
     assert result.discovery_status["cycle_metrics"]["accepted_results_count"] == 1
     assert result.discovery_status["cycle_metrics"]["candidate_count"] == 1
     assert result.discovery_status["cycle_metrics"]["selected_expansion_count"] == 1
@@ -764,9 +766,14 @@ def test_sync_all_persists_query_family_metrics(monkeypatch) -> None:
     )
     assert metrics_run is not None
     assert metrics_run.metadata_json["cycle_metrics"]["query_family_metrics"]["ats_direct"]["selected_for_expansion"] == 1
+    assert metrics_run.metadata_json["cycle_metrics"]["query_family_metrics"]["ats_direct"]["zero_visible_yield_expansions"] == 1
     company = session.query(sync_service.CompanyDiscovery).filter(sync_service.CompanyDiscovery.discovery_key == "greenhouse:acme").one()
     assert company.metadata_json["expansion_diagnostics"]["status"] == "empty"
     assert company.metadata_json["expansion_diagnostics"]["failure_boundary"] == "connector_yield"
+    assert company.metadata_json["discovery_lineage"]["planner"]["query_family"] == "ats_direct"
+    assert company.metadata_json["discovery_lineage"]["surface"]["source_lineage"] == "greenhouse+duckduckgo_html"
+    assert company.metadata_json["discovery_lineage"]["expansion"]["status"] == "empty"
+    assert company.metadata_json["discovery_lineage"]["expansion"]["visible_yield_state"] == "zero_yield"
 
 
 def test_sync_all_persists_ashby_invalid_surface_diagnostics(monkeypatch) -> None:
@@ -822,6 +829,90 @@ def test_sync_all_persists_ashby_invalid_surface_diagnostics(monkeypatch) -> Non
     assert result.discovery_status["cycle_metrics"]["empty_expansion_count"] == 1
     assert company.metadata_json["expansion_diagnostics"]["surface_status"] == "invalid_identifier"
     assert company.metadata_json["expansion_diagnostics"]["failure_boundary"] == "invalid_discovered_surface"
+
+
+def test_sync_all_persists_productive_query_family_lineage(monkeypatch) -> None:
+    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine, expire_on_commit=False)()
+    _seed_profile(session)
+
+    now = datetime.utcnow()
+
+    monkeypatch.setattr(sync_service, "get_candidate_profile", lambda _session: session.query(CandidateProfile).first())
+    monkeypatch.setattr(sync_service, "ensure_source_queries", lambda _session: [])
+    monkeypatch.setattr(sync_service, "generate_follow_up_tasks", lambda _session: 0)
+    monkeypatch.setattr(
+        sync_service,
+        "planner_agent",
+        lambda *_args, **_kwargs: {
+            "queries": ['"Acme" "operations lead" careers'],
+            "query_themes": ["company_targeted"],
+            "company_archetypes": [],
+            "priority_notes": [],
+        },
+    )
+    monkeypatch.setattr(sync_service, "extractor_agent", lambda *_args, **_kwargs: ([], []))
+    monkeypatch.setattr(sync_service, "learning_agent", lambda *_args, **_kwargs: {"next_queries": [], "focus_companies": [], "notes": []})
+    monkeypatch.setattr(sync_service, "triage_agent", lambda **_kwargs: (3.5, ["deterministic test"], "pursue"))
+    monkeypatch.setattr(
+        sync_service,
+        "judge_fit_with_ai",
+        lambda **_kwargs: {"classification": "strong_fit", "reasons": [], "matched_profile_fields": []},
+    )
+
+    def fake_run_connector_fetch(_session, connector_name, fetch_fn, date_fields=None):
+        if connector_name == "search_web":
+            return [
+                SearchDiscoveryResult(
+                    query_text='"Acme" "operations lead" careers',
+                    title="Operations Lead - Acme",
+                    url="https://job-boards.greenhouse.io/acme/jobs/1",
+                    query_family="company_targeted",
+                )
+            ], True, None
+        if connector_name == "greenhouse":
+            connector = fetch_fn.func.__self__
+            connector.last_board_counts = {"acme": 1}
+            return [
+                {
+                    "id": "gh-acme-1",
+                    "title": "Operations Lead",
+                    "absolute_url": "https://job-boards.greenhouse.io/acme/jobs/1",
+                    "updated_at": now.isoformat(),
+                    "first_published": now.isoformat(),
+                    "location": {"name": "Remote"},
+                    "content": "Own operating cadence and planning.",
+                    "company_name": "Acme",
+                    "source_board_token": "acme",
+                    "discovery_source": "search_web",
+                }
+            ], True, None
+        return [], False, None
+
+    monkeypatch.setattr(sync_service, "run_connector_fetch", fake_run_connector_fetch)
+    monkeypatch.setattr(
+        sync_service,
+        "get_settings",
+        lambda: Settings(search_discovery_enabled=True, greenhouse_enabled=True, ai_fit_max_calls_per_cycle=1, enable_ai_readtime_critic=False),
+    )
+
+    result = sync_service.sync_all(session, enabled_connectors={"search_web", "greenhouse"})
+
+    query_family_metrics = result.discovery_status["cycle_metrics"]["query_family_metrics"]
+    assert query_family_metrics["company_targeted"]["selected_for_expansion"] == 1
+    assert query_family_metrics["company_targeted"]["listings_yielded"] == 1
+    assert query_family_metrics["company_targeted"]["visible_yield_count"] == 1
+    assert query_family_metrics["company_targeted"]["expansions_with_visible_yield"] == 1
+
+    company = session.query(sync_service.CompanyDiscovery).filter(sync_service.CompanyDiscovery.discovery_key == "greenhouse:acme").one()
+    assert company.last_expansion_result_count == 1
+    assert company.visible_yield_count == 1
+    assert company.metadata_json["discovery_lineage"]["planner"]["query_family"] == "company_targeted"
+    assert company.metadata_json["discovery_lineage"]["surface"]["source_lineage"] == "greenhouse+duckduckgo_html"
+    assert company.metadata_json["discovery_lineage"]["expansion"]["result_count"] == 1
+    assert company.metadata_json["discovery_lineage"]["expansion"]["visible_yield_count"] == 1
+    assert company.metadata_json["discovery_lineage"]["expansion"]["visible_yield_state"] == "productive"
 
 
 def test_default_leads_query_returns_timestamp_precision_and_recently_seen_rows_only() -> None:
@@ -909,9 +1000,9 @@ def test_default_leads_query_returns_timestamp_precision_and_recently_seen_rows_
     assert item.company_name == "CurrentCo"
     assert item.freshness_hours is not None
     assert item.freshness_hours > 6
-    assert item.posted_at is not None and item.posted_at.second != 0
+    assert item.posted_at is not None and item.posted_at.microsecond != 0
     assert item.posted_at.tzinfo is not None
-    assert item.first_published_at is not None and item.first_published_at.second != 0
+    assert item.first_published_at is not None and item.first_published_at.microsecond != 0
     assert item.first_published_at.tzinfo is not None
     assert item.last_seen_at is not None
     assert item.last_seen_at.tzinfo is not None

@@ -65,6 +65,119 @@ class CompanyDiscoveryCandidate:
         return f"{self.board_type}:{self.board_locator.lower()}"
 
 
+def _discovery_metadata_with_lineage(
+    row: CompanyDiscovery,
+    *,
+    query_family: Optional[str] = None,
+    discovery_query: Optional[str] = None,
+    surface_provenance: Optional[str] = None,
+    source_lineage: Optional[str] = None,
+    selected: Optional[bool] = None,
+    selected_score: Optional[float] = None,
+    selected_reasons: Optional[list[str]] = None,
+    result_count: Optional[int] = None,
+    visible_yield_count: Optional[int] = None,
+    suppressed_yield_count: Optional[int] = None,
+    location_filtered_count: Optional[int] = None,
+    expansion_status: Optional[str] = None,
+    blocked_reason: Optional[str] = None,
+    failure_boundary: Optional[str] = None,
+    surface_status: Optional[str] = None,
+) -> dict:
+    def _as_count(value: Optional[int]) -> int:
+        return int(value or 0)
+
+    metadata = dict(row.metadata_json or {})
+    lineage = dict(metadata.get("discovery_lineage") or {})
+
+    planner_lineage = dict(lineage.get("planner") or {})
+    planner_lineage["query_family"] = query_family or metadata.get("query_family") or planner_lineage.get("query_family") or "unknown"
+    planner_lineage["query_text"] = discovery_query or row.discovery_query or planner_lineage.get("query_text")
+    lineage["planner"] = planner_lineage
+
+    surface_lineage = dict(lineage.get("surface") or {})
+    surface_lineage["board_type"] = row.board_type
+    surface_lineage["board_locator"] = row.board_locator
+    surface_lineage["discovery_source"] = row.discovery_source
+    surface_lineage["surface_provenance"] = (
+        surface_provenance or metadata.get("surface_provenance") or surface_lineage.get("surface_provenance")
+    )
+    surface_lineage["source_lineage"] = source_lineage or metadata.get("source_lineage") or surface_lineage.get("source_lineage")
+    lineage["surface"] = surface_lineage
+
+    expansion_lineage = dict(lineage.get("expansion") or {})
+    if selected is not None:
+        expansion_lineage["selected"] = selected
+    if selected_score is not None:
+        expansion_lineage["selected_score"] = selected_score
+    if selected_reasons is not None:
+        expansion_lineage["selected_reasons"] = selected_reasons
+    expansion_lineage["result_count"] = (
+        _as_count(row.last_expansion_result_count) if result_count is None else _as_count(result_count)
+    )
+    expansion_lineage["visible_yield_count"] = (
+        _as_count(row.visible_yield_count) if visible_yield_count is None else _as_count(visible_yield_count)
+    )
+    expansion_lineage["suppressed_yield_count"] = (
+        _as_count(row.suppressed_yield_count) if suppressed_yield_count is None else _as_count(suppressed_yield_count)
+    )
+    expansion_lineage["location_filtered_count"] = (
+        _as_count(row.location_filtered_count) if location_filtered_count is None else _as_count(location_filtered_count)
+    )
+    expansion_lineage["status"] = expansion_status or row.expansion_status
+    expansion_lineage["blocked_reason"] = blocked_reason if blocked_reason is not None else row.blocked_reason
+    if failure_boundary is not None:
+        expansion_lineage["failure_boundary"] = failure_boundary
+    if surface_status is not None:
+        expansion_lineage["surface_status"] = surface_status
+    expansion_lineage["visible_yield_state"] = (
+        "productive" if expansion_lineage["visible_yield_count"] > 0 else "zero_yield"
+    )
+    lineage["expansion"] = expansion_lineage
+
+    metadata["discovery_lineage"] = lineage
+    return metadata
+
+
+def persist_discovery_lineage(
+    row: CompanyDiscovery,
+    *,
+    query_family: Optional[str] = None,
+    discovery_query: Optional[str] = None,
+    surface_provenance: Optional[str] = None,
+    source_lineage: Optional[str] = None,
+    selected: Optional[bool] = None,
+    selected_score: Optional[float] = None,
+    selected_reasons: Optional[list[str]] = None,
+    result_count: Optional[int] = None,
+    visible_yield_count: Optional[int] = None,
+    suppressed_yield_count: Optional[int] = None,
+    location_filtered_count: Optional[int] = None,
+    expansion_status: Optional[str] = None,
+    blocked_reason: Optional[str] = None,
+    failure_boundary: Optional[str] = None,
+    surface_status: Optional[str] = None,
+) -> None:
+    row.metadata_json = _discovery_metadata_with_lineage(
+        row,
+        query_family=query_family,
+        discovery_query=discovery_query,
+        surface_provenance=surface_provenance,
+        source_lineage=source_lineage,
+        selected=selected,
+        selected_score=selected_score,
+        selected_reasons=selected_reasons,
+        result_count=result_count,
+        visible_yield_count=visible_yield_count,
+        suppressed_yield_count=suppressed_yield_count,
+        location_filtered_count=location_filtered_count,
+        expansion_status=expansion_status,
+        blocked_reason=blocked_reason,
+        failure_boundary=failure_boundary,
+        surface_status=surface_status,
+    )
+
+
 def _company_name_from_locator(locator: str) -> str:
     return locator.replace("-", " ").replace("_", " ").title()
 
@@ -239,6 +352,11 @@ def upsert_discovered_company(
         row.discovery_query = candidate.discovery_query
         row.last_discovered_at = now
         row.metadata_json = {**(row.metadata_json or {}), **metadata}
+        persist_discovery_lineage(
+            row,
+            query_family=candidate.query_family,
+            discovery_query=candidate.discovery_query,
+        )
         session.flush()
         return row, False
 
@@ -257,6 +375,11 @@ def upsert_discovered_company(
         metadata_json=metadata,
     )
     session.add(row)
+    persist_discovery_lineage(
+        row,
+        query_family=candidate.query_family,
+        discovery_query=candidate.discovery_query,
+    )
     session.flush()
     return row, True
 
@@ -313,6 +436,7 @@ def record_expansion_attempt(
     if blocked_reason == "investigate":
         row.expansion_status = "investigate"
         row.utility_score = round(max(row.utility_score, 0.5), 2)
+        persist_discovery_lineage(row)
         return
     if result_count == 0:
         row.expansion_status = "empty"
@@ -326,9 +450,11 @@ def record_expansion_attempt(
             - (location_filtered * 0.35),
             2,
         )
+    persist_discovery_lineage(row)
 
 
 def _company_discovery_row_response(row: CompanyDiscovery) -> CompanyDiscoveryRowResponse:
+    metadata_json = _discovery_metadata_with_lineage(row)
     return CompanyDiscoveryRowResponse(
         company_name=row.company_name,
         company_domain=row.company_domain,
@@ -350,7 +476,7 @@ def _company_discovery_row_response(row: CompanyDiscovery) -> CompanyDiscoveryRo
         location_filtered_count=row.location_filtered_count,
         utility_score=row.utility_score,
         blocked_reason=row.blocked_reason,
-        metadata_json=row.metadata_json or {},
+        metadata_json=metadata_json,
     )
 
 

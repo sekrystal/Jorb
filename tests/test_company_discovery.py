@@ -146,6 +146,10 @@ def test_record_expansion_attempt_updates_yield_and_status() -> None:
     assert row.visible_yield_count == 2
     assert row.location_filtered_count == 1
     assert row.expansion_status == "expanded"
+    assert row.metadata_json["discovery_lineage"]["planner"]["query_text"] == candidate.discovery_query
+    assert row.metadata_json["discovery_lineage"]["expansion"]["status"] == "expanded"
+    assert row.metadata_json["discovery_lineage"]["expansion"]["visible_yield_count"] == 2
+    assert row.metadata_json["discovery_lineage"]["expansion"]["visible_yield_state"] == "productive"
 
 
 def test_discovery_status_returns_recent_items() -> None:
@@ -234,9 +238,14 @@ def test_discovery_status_returns_recent_items() -> None:
             },
         )
     )
-    row.metadata_json = {"surface_provenance": "preseeded", "source_lineage": "greenhouse"}
-    blocked_row.metadata_json = {"surface_provenance": "discovered_new", "source_lineage": "greenhouse+search_web"}
-    ashby_row.metadata_json = {"surface_provenance": "discovered_new", "source_lineage": "ashby+search_web", "ashby_identifiers": [ashby_row.board_locator]}
+    row.metadata_json = {**(row.metadata_json or {}), "surface_provenance": "preseeded", "source_lineage": "greenhouse"}
+    blocked_row.metadata_json = {**(blocked_row.metadata_json or {}), "surface_provenance": "discovered_new", "source_lineage": "greenhouse+search_web"}
+    ashby_row.metadata_json = {
+        **(ashby_row.metadata_json or {}),
+        "surface_provenance": "discovered_new",
+        "source_lineage": "ashby+search_web",
+        "ashby_identifiers": [ashby_row.board_locator],
+    }
     row.last_expansion_result_count = 4
     session.commit()
 
@@ -256,6 +265,9 @@ def test_discovery_status_returns_recent_items() -> None:
     assert status.cycle_metrics["query_family_metrics"]["company_targeted"]["queries_attempted"] == 1
     assert status.cycle_metrics["query_family_metrics"]["company_targeted"]["selected_for_expansion"] == 1
     assert status.recent_successful_expansions
+    recent_example = next(item for item in status.recent_items if item.company_name == row.company_name)
+    assert recent_example.metadata_json["discovery_lineage"]["surface"]["source_lineage"] == "greenhouse"
+    assert recent_example.metadata_json["discovery_lineage"]["planner"]["query_family"] == "unknown"
 
 
 def test_discovery_status_uses_latest_relevant_runs_beyond_recent_window() -> None:

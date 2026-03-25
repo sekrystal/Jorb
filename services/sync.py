@@ -30,6 +30,7 @@ from services.company_discovery import (
     classify_surface_provenance,
     inspect_search_result_candidate,
     normalize_company_key,
+    persist_discovery_lineage,
     record_expansion_attempt,
     select_candidates_for_expansion,
     source_lineage_for_surface,
@@ -978,6 +979,13 @@ def sync_all(
                 "triage_used_openai": any(reason.startswith("ai:") for reason in triage_reasons),
                 **extra_metadata,
             }
+            persist_discovery_lineage(
+                row,
+                query_family=candidate.query_family,
+                discovery_query=candidate.discovery_query,
+                surface_provenance=surface_provenance,
+                source_lineage=source_lineage,
+            )
             discovery_rows_touched.append(row)
             _bump_query_family_metric(query_family_metrics, candidate.query_family, "candidate_conversions")
             candidate.is_new = is_new
@@ -1279,6 +1287,17 @@ def sync_all(
             "selected_this_cycle_at": datetime.utcnow().isoformat(),
             "expansion_diagnostics": expansion_diagnostics,
         }
+        persist_discovery_lineage(
+            row,
+            selected=True,
+            selected_score=score,
+            selected_reasons=reasons,
+            result_count=result_count,
+            expansion_status=row.expansion_status,
+            blocked_reason=blocked_reason,
+            failure_boundary=expansion_diagnostics.get("failure_boundary"),
+            surface_status=expansion_diagnostics.get("surface_status"),
+        )
         provenance = (row.metadata_json or {}).get("surface_provenance")
         logger.info(
             "[COMPANY_EXPANSION] %s",
@@ -1643,6 +1662,7 @@ def sync_all(
     generate_follow_up_tasks(session)
     for discovery_key, row in selected_discovery_rows_by_key.items():
         counts = discovery_yield_counts.get(discovery_key, Counter())
+        query_family = (row.metadata_json or {}).get("query_family")
         if (row.metadata_json or {}).get("surface_provenance") in {"discovered_existing", "discovered_new"}:
             cycle_metrics["agent_discovered_visible_leads_count"] += counts.get("visible", 0)
         record_expansion_attempt(
@@ -1653,6 +1673,13 @@ def sync_all(
             location_filtered=counts.get("location", 0),
             count_attempt=False,
         )
+        _bump_query_family_metric(query_family_metrics, query_family, "visible_yield_count", counts.get("visible", 0))
+        _bump_query_family_metric(query_family_metrics, query_family, "suppressed_yield_count", counts.get("suppressed", 0))
+        _bump_query_family_metric(query_family_metrics, query_family, "location_filtered_count", counts.get("location", 0))
+        if counts.get("visible", 0) > 0:
+            _bump_query_family_metric(query_family_metrics, query_family, "expansions_with_visible_yield")
+        else:
+            _bump_query_family_metric(query_family_metrics, query_family, "zero_visible_yield_expansions")
         logger.info(
             "[NEW_COMPANY_VISIBLE_YIELD] %s",
             {

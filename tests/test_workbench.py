@@ -178,14 +178,15 @@ def test_discovery_query_family_frame_flattens_metrics_for_ui() -> None:
     frame = ui_app.discovery_query_family_frame(
         {
             "query_family_metrics": {
-                "ats_direct": {"queries_attempted": 2, "accepted_results": 1},
-                "careers_broad": {"queries_attempted": 3, "selected_for_expansion": 1},
+                "ats_direct": {"queries_attempted": 2, "accepted_results": 1, "zero_visible_yield_expansions": 1},
+                "careers_broad": {"queries_attempted": 3, "selected_for_expansion": 1, "visible_yield_count": 2},
             }
         }
     )
 
     assert frame["query_family"].tolist() == ["ats_direct", "careers_broad"]
     assert frame.loc[frame["query_family"] == "ats_direct", "accepted_results"].iloc[0] == 1
+    assert frame.loc[frame["query_family"] == "careers_broad", "visible_yield_count"].iloc[0] == 2
 
 
 def test_runtime_surface_payload_prefers_health_truth_and_merges_summaries() -> None:
