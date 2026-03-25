@@ -16,6 +16,14 @@ if str(ROOT) not in sys.path:
 
 from services.document_ingest import preview_resume_text, preview_resume_upload
 from core.db import SessionLocal
+from services.feedback_learning import (
+    REJECTION_OUTCOME_REASON_LABELS,
+    REJECTION_STATUS_REASON_LABELS,
+    bucket_label,
+    categorize_rejection_feedback,
+    generate_improvement_recommendations,
+    reason_label,
+)
 from services.profile_ingest import build_profile_review_rows
 from services.pipeline import ingest_user_job_link
 
@@ -297,10 +305,21 @@ def send_feedback(lead_id: int, action: str, pattern: Optional[str] = None) -> N
     fetch_json("/feedback", method="POST", payload={"lead_id": lead_id, "action": action, "pattern": pattern})
 
 
-def update_application_status(lead_id: int, current_status: str, notes: str, date_applied_value: Optional[date]) -> None:
+def update_application_status(
+    lead_id: int,
+    current_status: str,
+    notes: str,
+    date_applied_value: Optional[date],
+    status_reason_code: Optional[str] = None,
+    outcome_reason_code: Optional[str] = None,
+) -> None:
     payload: dict[str, Any] = {"lead_id": lead_id, "current_status": current_status, "notes": notes or None}
     if date_applied_value:
         payload["date_applied"] = datetime.combine(date_applied_value, datetime.min.time()).isoformat()
+    if status_reason_code:
+        payload["status_reason_code"] = status_reason_code
+    if outcome_reason_code:
+        payload["outcome_reason_code"] = outcome_reason_code
     fetch_json("/applications/status", method="POST", payload=payload)
 
 
@@ -407,6 +426,18 @@ def recommendation_action_summary(lead: dict[str, Any]) -> str:
     action_label = score_payload.get("action_label") or "No action"
     action_explanation = score_payload.get("action_explanation") or "No action guidance recorded."
     return f"{action_label}: {action_explanation}"
+
+
+def rejection_feedback_summary(lead: dict[str, Any]) -> str:
+    feedback = categorize_rejection_feedback(
+        status_reason_code=lead.get("status_reason_code"),
+        outcome_reason_code=lead.get("outcome_reason_code"),
+        notes=lead.get("application_notes"),
+    )
+    buckets = feedback["reason_buckets"]
+    if not buckets:
+        return "No structured rejection feedback recorded."
+    return "Detected rejection themes: " + ", ".join(bucket_label(bucket) for bucket in buckets)
 
 
 def filter_and_sort_table(table: pd.DataFrame, filters: dict[str, Any]) -> pd.DataFrame:
@@ -674,21 +705,77 @@ def render_detail(lead: dict[str, Any], key: str) -> None:
             value=applied_default.date() if applied_default else date.today(),
             key=f"applied-date-{key}-{lead['id']}",
         )
-        notes = cols[2].text_input(
-            "Notes",
-            value=lead.get("application_notes") or "",
-            key=f"notes-{key}-{lead['id']}",
-        )
+        saved_status_reason = lead.get("status_reason_code") or ""
+        saved_outcome_reason = lead.get("outcome_reason_code") or ""
+        status_reason_code = saved_status_reason
+        outcome_reason_code = saved_outcome_reason
+        if next_status == "rejected":
+            rejection_cols = st.columns(2)
+            status_reason_options = list(REJECTION_STATUS_REASON_LABELS.keys())
+            outcome_reason_options = list(REJECTION_OUTCOME_REASON_LABELS.keys())
+            status_reason_index = status_reason_options.index(saved_status_reason) if saved_status_reason in status_reason_options else 0
+            outcome_reason_index = outcome_reason_options.index(saved_outcome_reason) if saved_outcome_reason in outcome_reason_options else 0
+            status_reason_code = rejection_cols[0].selectbox(
+                "Rejection stage",
+                status_reason_options,
+                index=status_reason_index,
+                format_func=lambda value: reason_label(value, REJECTION_STATUS_REASON_LABELS),
+                key=f"rejection-stage-{key}-{lead['id']}",
+            )
+            outcome_reason_code = rejection_cols[1].selectbox(
+                "Rejection reason",
+                outcome_reason_options,
+                index=outcome_reason_index,
+                format_func=lambda value: reason_label(value, REJECTION_OUTCOME_REASON_LABELS),
+                key=f"rejection-reason-{key}-{lead['id']}",
+            )
+            notes = cols[2].text_area(
+                "Feedback notes",
+                value=lead.get("application_notes") or "",
+                key=f"notes-{key}-{lead['id']}",
+                height=100,
+            )
+            feedback = categorize_rejection_feedback(
+                status_reason_code=status_reason_code,
+                outcome_reason_code=outcome_reason_code,
+                notes=notes,
+            )
+            recommendations = generate_improvement_recommendations(
+                status_reason_code=status_reason_code,
+                outcome_reason_code=outcome_reason_code,
+                notes=notes,
+            )
+            if feedback["reason_buckets"]:
+                st.caption("Detected rejection themes: " + ", ".join(bucket_label(bucket) for bucket in feedback["reason_buckets"]))
+            if recommendations:
+                st.warning("Improvement recommendations:\n" + "\n".join(f"- {item}" for item in recommendations))
+        else:
+            notes = cols[2].text_input(
+                "Notes",
+                value=lead.get("application_notes") or "",
+                key=f"notes-{key}-{lead['id']}",
+            )
         if st.button("Update tracker", use_container_width=True, key=f"tracker-{key}-{lead['id']}"):
             update_application_status(
                 lead["id"],
                 current_status=next_status,
                 notes=notes,
                 date_applied_value=applied_date if next_status != "saved" else None,
+                status_reason_code=status_reason_code or None,
+                outcome_reason_code=outcome_reason_code or None,
             )
             st.rerun()
         if lead.get("next_action"):
             st.info(f"Next action: {lead['next_action']}")
+        if current_status == "rejected":
+            st.caption(rejection_feedback_summary(lead))
+            recommendations = generate_improvement_recommendations(
+                status_reason_code=lead.get("status_reason_code"),
+                outcome_reason_code=lead.get("outcome_reason_code"),
+                notes=lead.get("application_notes"),
+            )
+            if recommendations:
+                st.info("Current improvement recommendations:\n" + "\n".join(f"- {item}" for item in recommendations))
 
 
 def render_user_job_link_form() -> None:

@@ -6,6 +6,7 @@ from sqlalchemy.orm import sessionmaker
 from core.models import Application, Base, Lead, SourceQuery, SourceQueryStat
 from core.schemas import FeedbackRequest
 from services.feedback import submit_feedback
+from services.feedback_learning import categorize_rejection_feedback, generate_improvement_recommendations
 from services.profile import get_candidate_profile
 
 
@@ -127,3 +128,27 @@ def test_feedback_updates_query_stats_once_per_event() -> None:
     stat = session.query(SourceQueryStat).filter(SourceQueryStat.query_text == "deployment strategist hiring").one()
     assert query.performance_stats_json["likes"] == 1
     assert stat.likes == 1
+
+
+def test_categorize_rejection_feedback_maps_codes_into_reason_buckets() -> None:
+    feedback = categorize_rejection_feedback(
+        status_reason_code="panel_decline",
+        outcome_reason_code="insufficient_b2b_saas_depth",
+        notes="Panel wanted deeper pricing ownership examples.",
+    )
+
+    assert feedback["status_reason_code"] == "panel_decline"
+    assert feedback["outcome_reason_code"] == "insufficient_b2b_saas_depth"
+    assert feedback["reason_buckets"] == ["interview_performance", "domain_depth", "pricing_depth"]
+
+
+def test_generate_improvement_recommendations_uses_note_fallbacks_for_targeted_guidance() -> None:
+    recommendations = generate_improvement_recommendations(
+        status_reason_code=None,
+        outcome_reason_code=None,
+        notes="Feedback was that the examples were not specific enough and lacked clear metrics.",
+    )
+
+    assert recommendations == [
+        "Replace general responsibility language with quantified before-and-after outcomes from the same type of problem."
+    ]

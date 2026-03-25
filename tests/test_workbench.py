@@ -200,6 +200,50 @@ def test_recommendation_action_summary_uses_action_label_and_explanation() -> No
     assert summary == "Seek referral: Seek referral because the source signal is still weak."
 
 
+def test_update_application_status_includes_structured_rejection_feedback(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_fetch_json(path: str, method: str = "GET", payload: dict | None = None):
+        captured["path"] = path
+        captured["method"] = method
+        captured["payload"] = payload or {}
+        return {"ok": True}
+
+    monkeypatch.setattr(ui_app, "fetch_json", fake_fetch_json)
+
+    ui_app.update_application_status(
+        lead_id=17,
+        current_status="rejected",
+        notes="Panel wanted more direct pricing examples.",
+        date_applied_value=date(2026, 3, 20),
+        status_reason_code="panel_decline",
+        outcome_reason_code="insufficient_pricing_depth",
+    )
+
+    assert captured["path"] == "/applications/status"
+    assert captured["method"] == "POST"
+    assert captured["payload"] == {
+        "lead_id": 17,
+        "current_status": "rejected",
+        "notes": "Panel wanted more direct pricing examples.",
+        "date_applied": "2026-03-20T00:00:00",
+        "status_reason_code": "panel_decline",
+        "outcome_reason_code": "insufficient_pricing_depth",
+    }
+
+
+def test_rejection_feedback_summary_surfaces_structured_buckets() -> None:
+    summary = ui_app.rejection_feedback_summary(
+        {
+            "status_reason_code": "panel_decline",
+            "outcome_reason_code": "insufficient_b2b_saas_depth",
+            "application_notes": "Strong operator profile, but the panel wanted deeper pricing experience.",
+        }
+    )
+
+    assert summary == "Detected rejection themes: Interview performance, Domain depth, Pricing depth"
+
+
 def test_fetch_json_returns_empty_leads_payload_on_request_failure(monkeypatch) -> None:
     captured: list[str] = []
     captured_timeout: list[int] = []
