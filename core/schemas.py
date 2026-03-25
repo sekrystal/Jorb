@@ -221,12 +221,15 @@ class AgentRunResponse(BaseModel):
 class AutonomyHealthResponse(BaseModel):
     last_successful_run_at: Optional[datetime] = None
     last_failed_run_at: Optional[datetime] = None
+    latest_success_summary: Optional[str] = None
+    latest_failure_summary: Optional[str] = None
     open_investigations: int = 0
     suppressed_leads: int = 0
     due_follow_ups: int = 0
     scheduler_enabled: bool = False
     runtime_state: str = "paused"
     worker_state: str = "idle"
+    runtime_phase: str = "paused"
     run_once_requested: bool = False
     last_cycle_started_at: Optional[datetime] = None
     last_successful_cycle_at: Optional[datetime] = None
@@ -237,11 +240,13 @@ class AutonomyHealthResponse(BaseModel):
     status_message: Optional[str] = None
     last_control_action: Optional[str] = None
     last_control_at: Optional[datetime] = None
+    operator_hints: list[str] = Field(default_factory=list)
 
 
 class RuntimeControlResponse(BaseModel):
     run_state: Literal["running", "paused"] = "paused"
     worker_state: Literal["idle", "paused", "sleeping", "running_cycle", "stopping", "error"] = "idle"
+    runtime_phase: str = "paused"
     run_once_requested: bool = False
     last_cycle_started_at: Optional[datetime] = None
     last_successful_cycle_at: Optional[datetime] = None
@@ -253,6 +258,8 @@ class RuntimeControlResponse(BaseModel):
     last_control_action: Optional[str] = None
     last_control_at: Optional[datetime] = None
     last_cycle_summary: Optional[str] = None
+    latest_failure_summary: Optional[str] = None
+    operator_hints: list[str] = Field(default_factory=list)
 
 
 class RuntimeControlRequest(BaseModel):

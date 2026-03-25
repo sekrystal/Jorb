@@ -105,6 +105,18 @@ def parse_timestamp(value: Optional[str]) -> Optional[datetime]:
         return None
 
 
+def runtime_surface_payload(runtime: dict[str, Any], health: dict[str, Any], digest: dict[str, Any]) -> dict[str, Any]:
+    latest_success_summary = health.get("latest_success_summary") or runtime.get("last_cycle_summary") or digest.get("summary")
+    latest_failure_summary = health.get("latest_failure_summary") or runtime.get("latest_failure_summary")
+    operator_hints = health.get("operator_hints") or runtime.get("operator_hints") or []
+    return {
+        "runtime_phase": health.get("runtime_phase") or runtime.get("runtime_phase") or runtime.get("worker_state") or "idle",
+        "latest_success_summary": latest_success_summary,
+        "latest_failure_summary": latest_failure_summary,
+        "operator_hints": operator_hints,
+    }
+
+
 def build_query(
     freshness_days: int,
     include_hidden: bool,
@@ -530,6 +542,7 @@ def render_agent_activity_tab() -> None:
     runtime = get_runtime_control()
     health = autonomy.get("health", {})
     digest = autonomy.get("digest", {})
+    runtime_surface = runtime_surface_payload(runtime, health, digest)
     summary = st.columns(6)
     summary[0].metric("Run state", runtime.get("run_state", "paused"))
     summary[1].metric("Worker state", runtime.get("worker_state", health.get("worker_state", "idle")))
@@ -540,26 +553,23 @@ def render_agent_activity_tab() -> None:
     ops = st.columns(2)
     ops[0].metric("Open investigations", health.get("open_investigations", 0))
     ops[1].metric("Due follow-ups", health.get("due_follow_ups", 0))
-    interval_cols = st.columns(3)
-    interval_cols[0].metric("Next cycle", format_timestamp(runtime.get("next_cycle_at")) or "pending")
-    interval_cols[1].metric("Current interval", f"{runtime.get('current_interval_seconds', 0)}s")
-    interval_cols[2].metric("Last control", runtime.get("last_control_action") or "none")
+    interval_cols = st.columns(4)
+    interval_cols[0].metric("Runtime phase", runtime_surface["runtime_phase"])
+    interval_cols[1].metric("Next cycle", format_timestamp(runtime.get("next_cycle_at")) or "pending")
+    interval_cols[2].metric("Current interval", f"{runtime.get('current_interval_seconds', 0)}s")
+    interval_cols[3].metric("Last control", runtime.get("last_control_action") or "none")
     if health.get("last_failed_run_at"):
         st.caption(f"Last failed run: {format_timestamp(health.get('last_failed_run_at'))}")
     if runtime.get("last_control_at"):
         st.caption(f"Last control change: {format_timestamp(runtime.get('last_control_at'))}")
-    if runtime.get("worker_state") == "sleeping":
-        st.caption(f"Worker is healthy and sleeping until the next cycle at {format_timestamp(runtime.get('next_cycle_at'))}.")
-    elif runtime.get("worker_state") == "paused":
-        st.caption("Worker is paused and will not start another cycle until you press Play or Run once.")
-    elif runtime.get("worker_state") == "running_cycle":
-        st.caption("Worker is actively running a cycle now.")
-    elif runtime.get("worker_state") == "stopping":
-        st.caption("Worker is shutting down cleanly.")
+    for hint in runtime_surface["operator_hints"]:
+        st.caption(hint)
     if runtime.get("status_message"):
         st.caption(runtime["status_message"])
-    if runtime.get("last_cycle_summary"):
-        st.caption(runtime["last_cycle_summary"])
+    if runtime_surface["latest_success_summary"]:
+        st.info(f"Latest success: {runtime_surface['latest_success_summary']}")
+    if runtime_surface["latest_failure_summary"]:
+        st.warning(f"Latest failure: {runtime_surface['latest_failure_summary']}")
 
     if digest.get("summary"):
         with st.expander("Latest run summary", expanded=True):

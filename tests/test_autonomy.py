@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+from core.config import Settings
 from connectors.greenhouse import GreenhouseFetchError
 from core.models import (
     AgentActivity,
@@ -16,6 +17,7 @@ from core.models import (
     Lead,
     Listing,
     RunDigest,
+    RuntimeControl,
     SourceQueryStat,
     WatchlistItem,
 )
@@ -71,6 +73,15 @@ def test_learning_agent_caps_watchlist_growth_per_cycle() -> None:
 def test_autonomy_health_and_digest_include_recent_run_state() -> None:
     session = build_session()
     session.add(Investigation(signal_id=1, status="open", confidence=0.5))
+    runtime = RuntimeControl(
+        run_state="paused",
+        worker_state="paused",
+        run_once_requested=True,
+        status_message="Single cycle requested.",
+        last_cycle_summary="Latest successful worker cycle.",
+        last_successful_cycle_at=datetime.utcnow() - timedelta(minutes=5),
+    )
+    session.add(runtime)
     session.add(
         Application(
             lead_id=1,
@@ -97,6 +108,15 @@ def test_autonomy_health_and_digest_include_recent_run_state() -> None:
         affected_count=7,
     )
     session.add(run)
+    session.add(
+        AgentRun(
+            agent_name="Pipeline",
+            action="ran full pipeline",
+            status="failed",
+            summary="Connector fetch failed for greenhouse.",
+            affected_count=0,
+        )
+    )
     session.flush()
     session.add(
         RunDigest(
@@ -110,11 +130,16 @@ def test_autonomy_health_and_digest_include_recent_run_state() -> None:
     )
     session.flush()
 
-    health = build_autonomy_health(session)
+    settings = Settings(database_url="sqlite:///:memory:", autonomy_enabled=True, demo_mode=True)
+    health = build_autonomy_health(session, settings=settings)
     digest = build_latest_run_digest(session)
 
     assert health.open_investigations == 1
     assert health.due_follow_ups == 1
+    assert health.runtime_phase == "queued"
+    assert health.latest_success_summary == "Latest successful worker cycle."
+    assert health.latest_failure_summary == "Connector fetch failed for greenhouse."
+    assert "A single bounded cycle is queued" in health.operator_hints[0]
     assert digest.new_leads == ["Ramp / Strategic Programs Lead"]
     assert digest.suppressed_leads == ["ArchiveCo / Chief of Staff"]
 

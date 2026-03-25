@@ -9,17 +9,17 @@ from core.config import Settings, get_settings
 from core.models import AgentRun, ConnectorHealth, DailyDigest, FollowUpTask, Investigation, Lead, RunDigest, RuntimeControl
 from core.schemas import AutonomyDigestResponse, AutonomyHealthResponse, ConnectorHealthResponse, DailyDigestResponse
 from services.connector_admin import CONNECTOR_CONFIG_KEYS, connector_blocked_reason
-from services.runtime_control import effective_worker_interval_seconds
+from services.runtime_control import effective_worker_interval_seconds, runtime_operator_hints, runtime_phase
 
 
 def build_autonomy_health(session: Session, settings: Settings | None = None) -> AutonomyHealthResponse:
     settings = settings or get_settings()
-    last_success = session.scalar(
-        select(AgentRun.created_at)
+    latest_success_run = session.execute(
+        select(AgentRun.created_at, AgentRun.summary)
         .where(AgentRun.status == "ok")
         .order_by(AgentRun.created_at.desc())
         .limit(1)
-    )
+    ).first()
     open_investigations = session.scalar(
         select(func.count(Investigation.id)).where(Investigation.status.in_(["open", "rechecking"]))
     ) or 0
@@ -27,29 +27,49 @@ def build_autonomy_health(session: Session, settings: Settings | None = None) ->
     due_follow_ups = session.scalar(
         select(func.count(FollowUpTask.id)).where(FollowUpTask.status == "open", FollowUpTask.due_at <= datetime.utcnow())
     ) or 0
-    last_failure = session.scalar(
-        select(AgentRun.created_at).where(AgentRun.status == "failed").order_by(AgentRun.created_at.desc()).limit(1)
-    )
+    latest_failure_run = session.execute(
+        select(AgentRun.created_at, AgentRun.summary).where(AgentRun.status == "failed").order_by(AgentRun.created_at.desc()).limit(1)
+    ).first()
     runtime = session.scalar(select(RuntimeControl).order_by(RuntimeControl.id.asc()))
+    runtime_state = runtime.run_state if runtime else ("running" if settings.autonomy_enabled else "paused")
+    worker_state = runtime.worker_state if runtime else "idle"
+    run_once_requested = runtime.run_once_requested if runtime else False
+    next_cycle_at = runtime.sleep_until if runtime else None
+    last_successful_cycle_at = runtime.last_successful_cycle_at if runtime else None
+    phase = runtime_phase(runtime_state, worker_state, run_once_requested, autonomy_enabled=settings.autonomy_enabled)
+    latest_success_summary = (runtime.last_cycle_summary if runtime and runtime.last_cycle_summary else None) or (
+        latest_success_run.summary if latest_success_run else None
+    )
+    latest_failure_summary = latest_failure_run.summary if latest_failure_run else None
     return AutonomyHealthResponse(
-        last_successful_run_at=last_success,
-        last_failed_run_at=last_failure,
+        last_successful_run_at=latest_success_run.created_at if latest_success_run else None,
+        last_failed_run_at=latest_failure_run.created_at if latest_failure_run else None,
+        latest_success_summary=latest_success_summary,
+        latest_failure_summary=latest_failure_summary,
         open_investigations=open_investigations,
         suppressed_leads=suppressed_leads,
         due_follow_ups=due_follow_ups,
         scheduler_enabled=settings.enable_scheduler,
-        runtime_state=runtime.run_state if runtime else ("running" if settings.autonomy_enabled else "paused"),
-        worker_state=runtime.worker_state if runtime else "idle",
-        run_once_requested=runtime.run_once_requested if runtime else False,
+        runtime_state=runtime_state,
+        worker_state=worker_state,
+        runtime_phase=phase,
+        run_once_requested=run_once_requested,
         last_cycle_started_at=runtime.last_cycle_started_at if runtime else None,
-        last_successful_cycle_at=runtime.last_successful_cycle_at if runtime else None,
+        last_successful_cycle_at=last_successful_cycle_at,
         last_heartbeat_at=runtime.last_heartbeat_at if runtime else None,
         sleep_until=runtime.sleep_until if runtime else None,
-        next_cycle_at=runtime.sleep_until if runtime else None,
+        next_cycle_at=next_cycle_at,
         current_interval_seconds=effective_worker_interval_seconds(settings),
         status_message=runtime.status_message if runtime else None,
         last_control_action=runtime.last_control_action if runtime else None,
         last_control_at=runtime.last_control_at if runtime else None,
+        operator_hints=runtime_operator_hints(
+            phase=phase,
+            run_once_requested=run_once_requested,
+            next_cycle_at=next_cycle_at,
+            last_successful_cycle_at=last_successful_cycle_at,
+            latest_failure_summary=latest_failure_summary,
+        ),
     )
 
 

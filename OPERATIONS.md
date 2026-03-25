@@ -75,6 +75,10 @@ curl -s http://127.0.0.1:8000/autonomy-status
 
 Look for:
 
+- `runtime_phase`
+- `operator_hints`
+- `latest_success_summary`
+- `latest_failure_summary`
 - `status`
 - `circuit_state`
 - `last_success_at`
@@ -161,3 +165,7 @@ sudo -u oppscout env $(grep -v '^#' /etc/opportunity-scout/opportunity-scout.env
 8. Confirm runtime state is what you expect:
    - `paused` for cautious bring-up
    - `running` only when you intentionally want unattended cycles
+9. Confirm operator truth surfaces are coherent:
+   - `runtime_phase` matches `run_state` plus `worker_state`
+   - `operator_hints` explain the next safe operator action
+   - latest success and failure summaries match recent logs or digests

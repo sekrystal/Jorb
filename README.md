@@ -132,9 +132,13 @@ Health and trust signals now visible in `Agent Activity`:
 
 - last successful run time
 - last failed run time
+- derived runtime phase (`disabled`, `paused`, `queued`, `running`, `sleeping`, `idle`, `error`)
+- operator hints tied to the current runtime phase
 - open investigations
 - suppressed leads
 - due follow-ups
+- latest success summary
+- latest failure summary
 - latest run summary digest
 
 ## Autonomous Loops

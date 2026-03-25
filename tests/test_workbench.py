@@ -136,3 +136,26 @@ def test_discovery_query_family_frame_flattens_metrics_for_ui() -> None:
 
     assert frame["query_family"].tolist() == ["ats_direct", "careers_broad"]
     assert frame.loc[frame["query_family"] == "ats_direct", "accepted_results"].iloc[0] == 1
+
+
+def test_runtime_surface_payload_prefers_health_truth_and_merges_summaries() -> None:
+    payload = ui_app.runtime_surface_payload(
+        runtime={
+            "runtime_phase": "paused",
+            "last_cycle_summary": "Runtime success summary",
+            "latest_failure_summary": "Runtime failure summary",
+            "operator_hints": ["runtime hint"],
+        },
+        health={
+            "runtime_phase": "queued",
+            "latest_success_summary": "Health success summary",
+            "latest_failure_summary": "Health failure summary",
+            "operator_hints": ["health hint"],
+        },
+        digest={"summary": "Digest summary"},
+    )
+
+    assert payload["runtime_phase"] == "queued"
+    assert payload["latest_success_summary"] == "Health success summary"
+    assert payload["latest_failure_summary"] == "Health failure summary"
+    assert payload["operator_hints"] == ["health hint"]
