@@ -9,6 +9,7 @@ from services.document_ingest import preview_resume_text, preview_resume_upload
 from services.network_import import match_referral_paths, parse_network_csv
 from services.profile import (
     attach_network_import,
+    build_profile_data_inventory,
     extract_network_import,
     extract_text_from_resume_upload,
     get_candidate_profile,
@@ -216,3 +217,45 @@ def test_network_import_round_trips_through_profile_summary() -> None:
 
     assert extract_network_import(merged)["source_filename"] == "network.csv"
     assert extract_network_import(merged)["contacts"][0]["company"] == "Mercor"
+
+
+def test_profile_data_inventory_surfaces_categories_provenance_and_processing_path() -> None:
+    payload = CandidateProfilePayload(
+        name="Privacy Test",
+        raw_resume_text="Chief of staff with 8 years in AI.",
+        preferred_titles_json=["chief of staff"],
+        core_titles_json=["chief of staff"],
+        preferred_domains_json=["ai"],
+        preferred_locations_json=["remote"],
+        confirmed_skills_json=["sql"],
+        structured_profile_json=StructuredCandidateProfile(
+            version="v1",
+            targeting={"preferred_titles": ["chief of staff"], "core_titles": ["chief of staff"]},
+            scoring={"minimum_fit_threshold": 2.8},
+        ),
+        extracted_summary_json=attach_network_import(
+            {
+                "summary": "Saved profile",
+                "resume_filename": "resume.txt",
+                "learning": {
+                    "generated_queries": ["chief of staff ai"],
+                    "title_weights": {"chief of staff": 1.2},
+                },
+            },
+            parse_network_csv(
+                "network.csv",
+                "name,company,title,relationship\nJamie Lee,Mercor,Ops Lead,former teammate\n",
+            ),
+        ),
+    )
+
+    inventory = build_profile_data_inventory(payload.model_dump())
+    inventory_by_key = {row["category_key"]: row for row in inventory}
+
+    assert inventory_by_key["resume_text"]["stored"] is True
+    assert inventory_by_key["resume_text"]["provenance"] == "Uploaded or pasted by the operator"
+    assert inventory_by_key["network_contacts"]["item_count"] == 1
+    assert inventory_by_key["network_contacts"]["processing_path"] == "local_only"
+    assert inventory_by_key["profile_preferences"]["processing_path"] == "cloud_assisted"
+    assert "chief of staff" in inventory_by_key["profile_preferences"]["example_values"]
+    assert inventory_by_key["learning_state"]["stored"] is True

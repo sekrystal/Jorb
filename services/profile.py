@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from io import BytesIO
 import re
-from typing import Optional
+from typing import Any, Optional
 
 from pypdf import PdfReader
 from sqlalchemy import select
@@ -46,6 +46,67 @@ PROFILE_MODEL_FIELDS = {
     for column in CandidateProfile.__table__.columns
     if column.name not in {"id", "created_at", "updated_at"}
 }
+PROFILE_INVENTORY_CATEGORY_SPECS = [
+    {
+        "key": "resume_text",
+        "label": "Resume text",
+        "storage_fields": ["raw_resume_text"],
+        "provenance": "Uploaded or pasted by the operator",
+        "usage": "Used for local resume parsing, profile review, and deterministic lead matching.",
+        "processing_path": "local_only",
+    },
+    {
+        "key": "profile_preferences",
+        "label": "Profile preferences",
+        "storage_fields": [
+            "name",
+            "preferred_titles_json",
+            "core_titles_json",
+            "adjacent_titles_json",
+            "excluded_titles_json",
+            "preferred_domains_json",
+            "preferred_locations_json",
+            "excluded_companies_json",
+            "confirmed_skills_json",
+            "competencies_json",
+            "explicit_preferences_json",
+            "stage_preferences_json",
+            "stretch_role_families_json",
+            "excluded_keywords_json",
+            "seniority_guess",
+            "min_seniority_band",
+            "max_seniority_band",
+            "minimum_fit_threshold",
+        ],
+        "provenance": "Derived from the saved candidate profile and operator edits.",
+        "usage": "Used to filter, rank, and explain leads in the local workbench.",
+        "processing_path": "cloud_assisted",
+    },
+    {
+        "key": "structured_profile",
+        "label": "Structured profile schema",
+        "storage_fields": ["extracted_summary_json.structured_profile", "extracted_summary_json.profile_schema_version"],
+        "provenance": "Generated from the local profile payload before persistence.",
+        "usage": "Provides stable schema-backed targeting fields for discovery and scoring flows.",
+        "processing_path": "cloud_assisted",
+    },
+    {
+        "key": "network_contacts",
+        "label": "Network contacts",
+        "storage_fields": ["extracted_summary_json.network_import"],
+        "provenance": "Imported locally from a CSV or pasted network export.",
+        "usage": "Used only for local referral-path suggestions shown in the workbench.",
+        "processing_path": "local_only",
+    },
+    {
+        "key": "learning_state",
+        "label": "Learning state",
+        "storage_fields": ["extracted_summary_json.learning"],
+        "provenance": "Derived from local feedback, application tracking, and discovery outcomes.",
+        "usage": "Used to summarize learned boosts, penalties, and generated query context.",
+        "processing_path": "cloud_assisted",
+    },
+]
 
 
 def _match_known_terms(text: str, choices: list[str]) -> list[str]:
@@ -249,6 +310,59 @@ def attach_network_import(extracted_summary_json: Optional[dict], network_payloa
     return merged
 
 
+def build_profile_data_inventory(profile: CandidateProfile | dict[str, Any]) -> list[dict[str, Any]]:
+    profile_data = _profile_data_dict(profile)
+    summary = profile_data.get("extracted_summary_json") or {}
+    learning = summary.get("learning") if isinstance(summary.get("learning"), dict) else {}
+    network_payload = extract_network_import(summary)
+    inventory_rows: list[dict[str, Any]] = []
+
+    for spec in PROFILE_INVENTORY_CATEGORY_SPECS:
+        key = spec["key"]
+        if key == "resume_text":
+            item_count = 1 if (profile_data.get("raw_resume_text") or "").strip() else 0
+            example_values = [summary.get("resume_filename") or "pasted resume"] if item_count else []
+        elif key == "profile_preferences":
+            item_count = sum(
+                1
+                for field_name in spec["storage_fields"]
+                if _field_has_value(profile_data.get(field_name))
+            )
+            example_values = [
+                *(profile_data.get("core_titles_json") or [])[:2],
+                *(profile_data.get("preferred_domains_json") or [])[:2],
+            ]
+        elif key == "structured_profile":
+            structured_profile = summary.get(PROFILE_SCHEMA_KEY) if isinstance(summary.get(PROFILE_SCHEMA_KEY), dict) else {}
+            item_count = len(structured_profile)
+            example_values = list(structured_profile.keys())[:3]
+        elif key == "network_contacts":
+            contacts = network_payload.get("contacts") or []
+            item_count = len(contacts)
+            example_values = [contact.get("company") or contact.get("name") or "" for contact in contacts[:3]]
+        else:
+            item_count = sum(len(value) if isinstance(value, list) else 1 for value in learning.values()) if learning else 0
+            example_values = [
+                *(learning.get("generated_queries") or [])[:2],
+                *list((learning.get("title_weights") or {}).keys())[:2],
+            ]
+
+        inventory_rows.append(
+            {
+                "category_key": key,
+                "category": spec["label"],
+                "stored": item_count > 0,
+                "item_count": item_count,
+                "storage_fields": spec["storage_fields"],
+                "provenance": spec["provenance"],
+                "usage": spec["usage"],
+                "processing_path": spec["processing_path"],
+                "example_values": [value for value in example_values if value],
+            }
+        )
+    return inventory_rows
+
+
 def _with_structured_profile(payload: CandidateProfilePayload) -> CandidateProfilePayload:
     return CandidateProfilePayload(**payload.model_dump())
 
@@ -258,6 +372,22 @@ def _merge_structured_profile(extracted_summary_json: dict, payload: CandidatePr
     merged["profile_schema_version"] = payload.profile_schema_version
     merged[PROFILE_SCHEMA_KEY] = payload.structured_profile_json.model_dump() if payload.structured_profile_json else {}
     return merged
+
+
+def _profile_data_dict(profile: CandidateProfile | dict[str, Any]) -> dict[str, Any]:
+    if isinstance(profile, dict):
+        return dict(profile)
+    return {field_name: getattr(profile, field_name, None) for field_name in PROFILE_MODEL_FIELDS | {"name", "extracted_summary_json"}}
+
+
+def _field_has_value(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (list, dict, tuple, set)):
+        return bool(value)
+    return True
 
 
 def _profile_model_values(payload: CandidateProfilePayload) -> dict:

@@ -291,6 +291,60 @@ def test_fetch_json_returns_empty_leads_payload_on_request_failure(monkeypatch) 
     assert captured_timeout == [10]
 
 
+def test_profile_inventory_frame_labels_local_and_cloud_assisted_categories() -> None:
+    frame = ui_app.profile_inventory_frame(
+        {
+            "name": "Privacy Test",
+            "raw_resume_text": "operator resume",
+            "preferred_titles_json": ["chief of staff"],
+            "core_titles_json": ["chief of staff"],
+            "preferred_domains_json": ["ai"],
+            "extracted_summary_json": {
+                "summary": "Saved profile",
+                "resume_filename": "resume.txt",
+                "structured_profile": {"targeting": {"preferred_titles": ["chief of staff"]}},
+                "network_import": {
+                    "contacts": [{"name": "Alex Rivera", "company": "Linear"}],
+                },
+            },
+        }
+    )
+
+    assert frame["Category"].tolist() == [
+        "Resume text",
+        "Profile preferences",
+        "Structured profile schema",
+        "Network contacts",
+        "Learning state",
+    ]
+    assert "Local only" in frame["Processing path"].tolist()
+    assert "Cloud assisted" in frame["Processing path"].tolist()
+
+
+def test_profile_inventory_export_summarizes_basic_export_behavior() -> None:
+    export = ui_app.profile_inventory_export(
+        {
+            "name": "Privacy Test",
+            "raw_resume_text": "operator resume",
+            "preferred_titles_json": ["chief of staff"],
+            "core_titles_json": ["chief of staff"],
+            "preferred_domains_json": ["ai"],
+            "extracted_summary_json": {
+                "resume_filename": "resume.txt",
+                "structured_profile": {"targeting": {"preferred_titles": ["chief of staff"]}},
+                "learning": {"generated_queries": ["chief of staff ai"]},
+            },
+        }
+    )
+
+    assert export["inventory_version"] == "v1"
+    assert export["profile_name"] == "Privacy Test"
+    assert export["summary"]["stored_categories"] == 4
+    assert export["summary"]["local_only_categories"] == 2
+    assert export["summary"]["cloud_assisted_categories"] == 3
+    assert export["categories"][0]["category_key"] == "resume_text"
+
+
 def test_discovery_query_family_frame_flattens_metrics_for_ui() -> None:
     frame = ui_app.discovery_query_family_frame(
         {

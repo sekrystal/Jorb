@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import sys
 from datetime import date, datetime
@@ -25,7 +26,7 @@ from services.feedback_learning import (
     reason_label,
 )
 from services.network_import import match_referral_paths, parse_network_csv
-from services.profile import attach_network_import, extract_network_import
+from services.profile import attach_network_import, build_profile_data_inventory, extract_network_import
 from services.profile_ingest import build_profile_review_rows
 from services.pipeline import ingest_user_job_link
 
@@ -243,6 +244,39 @@ def referral_strategy_summary(lead: dict[str, Any], profile: dict[str, Any]) -> 
     if not matches:
         return "No saved referral paths for this company."
     return "Possible referral paths: " + "; ".join(match["path_summary"] for match in matches)
+
+
+def profile_inventory_frame(profile: dict[str, Any]) -> pd.DataFrame:
+    inventory_rows = build_profile_data_inventory(profile)
+    frame_rows = []
+    for row in inventory_rows:
+        frame_rows.append(
+            {
+                "Category": row["category"],
+                "Stored": "yes" if row["stored"] else "no",
+                "Items": row["item_count"],
+                "Processing path": "Local only" if row["processing_path"] == "local_only" else "Cloud assisted",
+                "Provenance": row["provenance"],
+                "Usage": row["usage"],
+                "Examples": ", ".join(row["example_values"]) or "",
+            }
+        )
+    return pd.DataFrame(frame_rows)
+
+
+def profile_inventory_export(profile: dict[str, Any]) -> dict[str, Any]:
+    inventory_rows = build_profile_data_inventory(profile)
+    return {
+        "inventory_version": "v1",
+        "profile_name": profile.get("name", "Demo Candidate"),
+        "generated_at": datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
+        "summary": {
+            "stored_categories": sum(1 for row in inventory_rows if row["stored"]),
+            "local_only_categories": sum(1 for row in inventory_rows if row["processing_path"] == "local_only"),
+            "cloud_assisted_categories": sum(1 for row in inventory_rows if row["processing_path"] == "cloud_assisted"),
+        },
+        "categories": inventory_rows,
+    }
 
 
 def render_onboarding_progress(state: dict[str, Any]) -> None:
@@ -1046,6 +1080,26 @@ def render_profile_tab(profile: dict[str, Any], learning: dict[str, Any]) -> Non
                 hide_index=True,
                 column_config={"profile_url": st.column_config.LinkColumn("Profile", display_text="open", validate="^https?://")},
             )
+
+    st.markdown("#### Privacy and local data inventory")
+    st.caption(
+        "Inspect what JORB stores locally for your profile, where it came from, and whether a category stays local or can flow into cloud-assisted discovery paths."
+    )
+    inventory_frame = profile_inventory_frame(profile)
+    inventory_export = profile_inventory_export(profile)
+    inventory_summary = st.columns(3)
+    inventory_summary[0].metric("Stored categories", inventory_export["summary"]["stored_categories"])
+    inventory_summary[1].metric("Local only", inventory_export["summary"]["local_only_categories"])
+    inventory_summary[2].metric("Cloud assisted", inventory_export["summary"]["cloud_assisted_categories"])
+    if not inventory_frame.empty:
+        st.dataframe(inventory_frame, use_container_width=True, hide_index=True)
+    st.download_button(
+        "Export inventory JSON",
+        data=json.dumps(inventory_export, indent=2),
+        file_name="jorb-profile-data-inventory.json",
+        mime="application/json",
+        use_container_width=True,
+    )
 
     st.caption(f"Profile schema: {profile.get('profile_schema_version', 'v1')}")
     st.caption(profile.get("extracted_summary_json", {}).get("summary", "No profile summary yet."))
