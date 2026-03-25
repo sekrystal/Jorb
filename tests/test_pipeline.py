@@ -8,7 +8,7 @@ from sqlalchemy.orm import sessionmaker
 from core.schemas import LeadResponse
 from core.models import AgentActivity, Base, Lead, Listing
 from core.schemas import SyncResult
-from services.pipeline import recommendation_component_value, recommendation_score_value, run_scout_agent
+from services.pipeline import ingest_user_job_link, recommendation_component_value, recommendation_score_value, run_scout_agent
 from services.profile import ingest_resume
 from services.sync import sync_all
 
@@ -188,3 +188,43 @@ def test_run_scout_agent_records_high_evergreen_temporal_intelligence_for_old_ac
     assert intelligence["evergreen_likelihood"] == "high"
     assert "always hiring" in intelligence["evergreen_signals"]
     assert "evergreen_high=1" in result.summary
+
+
+def test_ingest_user_job_link_routes_manual_submission_through_listing_pipeline() -> None:
+    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine, expire_on_commit=False)()
+
+    ingest_resume(
+        session,
+        filename="resume.txt",
+        raw_text="Operator with chief of staff and strategic programs experience in AI companies.",
+    )
+
+    result = ingest_user_job_link(
+        session,
+        job_url="https://boards.greenhouse.io/ramp/jobs/9999",
+        company_name="Ramp",
+        title="Strategic Programs Lead",
+        location="New York, NY",
+        description_text="Lead strategic programs, executive reporting, and operating cadences.",
+        posted_at=datetime.now(timezone.utc),
+    )
+    session.commit()
+
+    listing = session.get(Listing, result["listing_id"])
+    lead = session.get(Lead, result["lead_id"])
+
+    assert listing is not None
+    assert lead is not None
+    assert listing.source_type == "greenhouse"
+    assert (listing.metadata_json or {})["surface_provenance"] == "user_submitted"
+    assert (listing.metadata_json or {})["source_lineage"] == "greenhouse+user_submitted"
+    assert (listing.metadata_json or {})["submission_origin"] == "user_link"
+    assert lead.lead_type == "listing"
+    assert (lead.evidence_json or {})["source_provenance"] == "user_submitted"
+    assert (lead.evidence_json or {})["source_lineage"] == "greenhouse+user_submitted"
+    assert (lead.evidence_json or {})["submission_origin"] == "user_link"
+    assert lead.last_agent_action == "Scout: ingested user-submitted link"
+    assert lead.score_breakdown_json["source_quality"] == 1.2
+    assert "Freshness logic:" in (lead.explanation or "")

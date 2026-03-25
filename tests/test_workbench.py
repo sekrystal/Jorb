@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 import pandas as pd
 import requests
@@ -355,3 +355,72 @@ def test_build_profile_update_payload_preserves_extracted_resume_draft_fields() 
     assert payload["competencies_json"] == ["process design", "operator judgment"]
     assert payload["explicit_preferences_json"] == ["hands-on teams", "customer-facing work"]
     assert payload["seniority_guess"] == "senior"
+
+
+def test_lead_frame_prefers_source_lineage_for_provenance() -> None:
+    frame = ui_app.lead_frame(
+        [
+            {
+                "id": 11,
+                "company_name": "Ramp",
+                "primary_title": "Strategic Programs Lead",
+                "lead_type": "listing",
+                "url": "https://boards.greenhouse.io/ramp/jobs/9999",
+                "source_platform": "greenhouse",
+                "source_type": "greenhouse",
+                "source_lineage": "greenhouse+user_submitted",
+                "freshness_label": "fresh",
+                "qualification_fit_label": "strong fit",
+                "confidence_label": "high",
+                "surfaced_at": "2026-03-25T10:00:00Z",
+                "posted_at": "2026-03-25T09:00:00Z",
+                "evidence_json": {},
+            }
+        ]
+    )
+
+    assert frame["provenance"].tolist() == ["greenhouse+user_submitted"]
+
+
+def test_submit_user_job_link_uses_local_session_and_normalizes_optional_date(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeSession:
+        def commit(self) -> None:
+            captured["committed"] = True
+
+        def rollback(self) -> None:
+            captured["rolled_back"] = True
+
+        def close(self) -> None:
+            captured["closed"] = True
+
+    def fake_session_local() -> FakeSession:
+        return FakeSession()
+
+    def fake_ingest(session, **kwargs):
+        captured["session"] = session
+        captured["kwargs"] = kwargs
+        return {"summary": "ok", "source_lineage": "user_submitted"}
+
+    monkeypatch.setattr(ui_app, "SessionLocal", fake_session_local)
+    monkeypatch.setattr(ui_app, "ingest_user_job_link", fake_ingest)
+
+    result = ui_app.submit_user_job_link(
+        job_url="https://example.com/jobs/1",
+        company_name="Example",
+        title="Operator",
+        location="Remote",
+        description_text="Own planning and execution.",
+        posted_on=date(2026, 3, 24),
+    )
+
+    assert result == {"summary": "ok", "source_lineage": "user_submitted"}
+    assert captured["kwargs"]["job_url"] == "https://example.com/jobs/1"
+    assert captured["kwargs"]["company_name"] == "Example"
+    assert captured["kwargs"]["title"] == "Operator"
+    assert captured["kwargs"]["location"] == "Remote"
+    assert captured["kwargs"]["description_text"] == "Own planning and execution."
+    assert captured["kwargs"]["posted_at"] == datetime(2026, 3, 24, 0, 0)
+    assert captured["committed"] is True
+    assert captured["closed"] is True

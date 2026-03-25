@@ -15,7 +15,9 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from services.document_ingest import preview_resume_text, preview_resume_upload
+from core.db import SessionLocal
 from services.profile_ingest import build_profile_review_rows
+from services.pipeline import ingest_user_job_link
 
 
 API_BASE_URL = os.getenv("OPPORTUNITY_SCOUT_API_URL", "http://127.0.0.1:8000")
@@ -300,6 +302,34 @@ def update_application_status(lead_id: int, current_status: str, notes: str, dat
     if date_applied_value:
         payload["date_applied"] = datetime.combine(date_applied_value, datetime.min.time()).isoformat()
     fetch_json("/applications/status", method="POST", payload=payload)
+
+
+def submit_user_job_link(
+    job_url: str,
+    company_name: str,
+    title: str,
+    location: Optional[str] = None,
+    description_text: Optional[str] = None,
+    posted_on: Optional[date] = None,
+) -> dict[str, Any]:
+    session = SessionLocal()
+    try:
+        result = ingest_user_job_link(
+            session,
+            job_url=job_url,
+            company_name=company_name,
+            title=title,
+            location=location,
+            description_text=description_text,
+            posted_at=datetime.combine(posted_on, datetime.min.time()) if posted_on else None,
+        )
+        session.commit()
+        return result
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
 
 
 def lead_frame(leads: list[dict[str, Any]]) -> pd.DataFrame:
@@ -644,6 +674,42 @@ def render_detail(lead: dict[str, Any], key: str) -> None:
             st.rerun()
         if lead.get("next_action"):
             st.info(f"Next action: {lead['next_action']}")
+
+
+def render_user_job_link_form() -> None:
+    st.markdown("#### Add job link")
+    st.caption("Submit a job URL with minimal context. It will be normalized into the same listing-to-lead evaluation flow and marked as user-submitted provenance.")
+    with st.form("user-job-link-form"):
+        top = st.columns(3)
+        job_url = top[0].text_input("Job URL")
+        company_name = top[1].text_input("Company")
+        title = top[2].text_input("Title")
+        lower = st.columns(2)
+        location = lower[0].text_input("Location")
+        posted_on = lower[1].date_input("Posted date", value=None)
+        description_text = st.text_area("Description or notes", height=100)
+        submitted = st.form_submit_button("Ingest job link", use_container_width=True)
+    if submitted:
+        if not job_url.strip() or not company_name.strip() or not title.strip():
+            st.warning("Enter a job URL, company name, and title.")
+            return
+        try:
+            result = submit_user_job_link(
+                job_url=job_url,
+                company_name=company_name,
+                title=title,
+                location=location,
+                description_text=description_text,
+                posted_on=posted_on,
+            )
+        except Exception as exc:
+            st.error(f"Job link ingestion failed: {exc}")
+            return
+        st.session_state["user_job_link_ingest_result"] = result
+        st.rerun()
+    if st.session_state.get("user_job_link_ingest_result"):
+        result = st.session_state["user_job_link_ingest_result"]
+        st.success(f"{result['summary']} Provenance: {result['source_lineage']}.")
 
 
 def render_profile_tab(profile: dict[str, Any], learning: dict[str, Any]) -> None:
@@ -1167,6 +1233,7 @@ def main() -> None:
     )
 
     with tabs[0]:
+        render_user_job_link_form()
         leads = fetch_json(base_query)["items"]
         selected = render_table(leads, key="leads")
         if selected:

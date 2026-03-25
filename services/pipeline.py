@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from collections import Counter
+from urllib.parse import urlparse
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -128,6 +129,21 @@ def _coerce_datetime(value: str | None) -> datetime | None:
     if not value:
         return None
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def _source_type_for_user_url(url: str) -> str:
+    hostname = (urlparse(url).hostname or "").lower()
+    if "greenhouse.io" in hostname:
+        return "greenhouse"
+    if "ashbyhq.com" in hostname:
+        return "ashby"
+    return "user_submitted"
+
+
+def _source_lineage_for_user_submission(source_type: str) -> str:
+    if source_type in {"greenhouse", "ashby"}:
+        return f"{source_type}+user_submitted"
+    return "user_submitted"
 
 
 def _build_listing_temporal_intelligence(listing: Listing) -> dict[str, object]:
@@ -271,6 +287,109 @@ def _insert_demo_batch(session: Session) -> tuple[int, int, list[Listing], list[
         signal_count += 1
 
     return listing_count, signal_count, inserted_listings, inserted_signals
+
+
+def ingest_user_job_link(
+    session: Session,
+    *,
+    job_url: str,
+    company_name: str,
+    title: str,
+    location: str | None = None,
+    description_text: str | None = None,
+    posted_at: datetime | None = None,
+) -> dict[str, object]:
+    cleaned_url = job_url.strip()
+    cleaned_company = company_name.strip()
+    cleaned_title = title.strip()
+    cleaned_location = (location or "").strip() or None
+    cleaned_description = (description_text or "").strip() or None
+
+    if not cleaned_url:
+        raise ValueError("job_url is required")
+    if not cleaned_company:
+        raise ValueError("company_name is required")
+    if not cleaned_title:
+        raise ValueError("title is required")
+
+    source_type = _source_type_for_user_url(cleaned_url)
+    source_lineage = _source_lineage_for_user_submission(source_type)
+    record = validate_listing(
+        ListingRecord(
+            company_name=cleaned_company,
+            title=cleaned_title,
+            location=cleaned_location,
+            url=cleaned_url,
+            source_type=source_type,
+            posted_at=posted_at,
+            discovered_at=datetime.now(timezone.utc),
+            last_seen_at=datetime.now(timezone.utc),
+            description_text=cleaned_description,
+            metadata_json={
+                "page_text": cleaned_description or "",
+                "surface_provenance": "user_submitted",
+                "source_lineage": source_lineage,
+                "submission_origin": "user_link",
+            },
+        )
+    )
+    company = get_or_create_company(session, name=record.company_name, ats_provider=record.source_type)
+    listing, listing_created = _upsert_listing(session, record, company.id)
+    profile = get_candidate_profile(session)
+    lead, lead_created = _upsert_lead(
+        session=session,
+        lead_type="listing",
+        company_name=listing.company_name,
+        company_id=listing.company_id,
+        title=listing.title,
+        listing=listing,
+        signal=None,
+        profile=profile,
+        listing_url=listing.url,
+        source_type=listing.source_type,
+        company_domain=(listing.metadata_json or {}).get("company_domain"),
+        location=listing.location,
+        description_text=listing.description_text or "",
+        listing_status=listing.listing_status,
+        freshness_label=classify_freshness_label(listing.freshness_days, listing.freshness_hours),
+        evidence_json={
+            "snippets": [((listing.description_text or listing.title)[:240])],
+            "source_queries": [],
+            "source_provenance": "user_submitted",
+            "source_lineage": source_lineage,
+            "submission_origin": "user_link",
+        },
+    )
+    intelligence = _build_listing_temporal_intelligence(listing)
+    listing_metadata = dict(listing.metadata_json or {})
+    listing_metadata["opportunity_intelligence"] = intelligence
+    listing.metadata_json = listing_metadata
+
+    lead_evidence = dict(lead.evidence_json or {})
+    lead_evidence["opportunity_intelligence"] = intelligence
+    lead_evidence["freshness_logic_summary"] = intelligence.get("summary")
+    lead.evidence_json = lead_evidence
+    freshness_note = _freshness_logic_note(intelligence)
+    if freshness_note not in (lead.explanation or ""):
+        lead.explanation = f"{(lead.explanation or '').strip()} {freshness_note}".strip()
+    lead.last_agent_action = "Scout: ingested user-submitted link"
+    append_lead_agent_trace(
+        lead,
+        "Scout",
+        "ingested user-submitted link",
+        f"Scout ingested user-submitted link for {listing.company_name} / {listing.title}",
+        change_state="new" if lead_created else "updated",
+    )
+    session.flush()
+    return {
+        "listing_id": listing.id,
+        "lead_id": lead.id,
+        "listing_created": listing_created,
+        "lead_created": lead_created,
+        "source_type": source_type,
+        "source_lineage": source_lineage,
+        "summary": f"Ingested {listing.company_name} / {listing.title} from a user-submitted link.",
+    }
 
 
 def run_scout_agent(
