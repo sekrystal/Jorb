@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from core.schemas import LeadResponse
 from core.models import AgentActivity, Base, Lead, Listing
+from core.schemas import SyncResult
 from services.pipeline import recommendation_component_value, recommendation_score_value, run_scout_agent
 from services.profile import ingest_resume
 from services.sync import sync_all
@@ -32,6 +35,17 @@ def test_run_scout_agent_adds_demo_batch_and_logs_activity() -> None:
     assert session.query(Listing).count() > baseline_listings
     assert session.query(Lead).count() >= baseline_leads
     assert session.query(AgentActivity).filter(AgentActivity.agent_name == "Scout").count() >= 1
+
+    listing = session.query(Listing).order_by(Listing.id.desc()).first()
+    assert listing is not None
+    intelligence = (listing.metadata_json or {}).get("opportunity_intelligence") or {}
+    assert intelligence["freshness_label"] == "fresh"
+    assert intelligence["evergreen_likelihood"] == "low"
+
+    lead = session.query(Lead).filter(Lead.listing_id == listing.id).order_by(Lead.id.desc()).first()
+    assert lead is not None
+    assert "Freshness logic:" in (lead.explanation or "")
+    assert (lead.evidence_json or {}).get("opportunity_intelligence", {}).get("freshness_label") == "fresh"
 
 
 def test_lead_response_normalizes_recommendation_score_schema_with_traceable_components() -> None:
@@ -118,3 +132,59 @@ def test_recommendation_score_helpers_support_legacy_and_structured_payloads() -
         )
         == 1.9
     )
+
+
+def test_run_scout_agent_records_high_evergreen_temporal_intelligence_for_old_active_listing(monkeypatch) -> None:
+    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine, expire_on_commit=False)()
+
+    ingest_resume(
+        session,
+        filename="resume.txt",
+        raw_text="Operator with chief of staff and business operations experience.",
+    )
+    listing = Listing(
+        company_name="Evergreen Co",
+        title="General Application",
+        location="Remote",
+        url="https://example.com/jobs/general-application",
+        source_type="greenhouse",
+        posted_at=None,
+        description_text="We are always hiring and review future opportunities on a rolling basis.",
+        listing_status="active",
+        freshness_hours=24.0 * 60,
+        freshness_days=60,
+        metadata_json={"page_text": "Always hiring strategic operators."},
+    )
+    session.add(listing)
+    session.commit()
+
+    def fake_sync_all(*_args, **_kwargs) -> SyncResult:
+        listing.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
+        session.add(listing)
+        session.flush()
+        return SyncResult(
+            signals_ingested=0,
+            listings_ingested=0,
+            leads_created=0,
+            leads_updated=0,
+            rechecks_queued=0,
+            live_mode_used=False,
+            discovery_metrics={},
+            surfaced_count=0,
+            discovery_summary="No jobs found from any connector.",
+            discovery_status={},
+        )
+
+    monkeypatch.setattr("services.pipeline.sync_all", fake_sync_all)
+
+    result = run_scout_agent(session, source_mode="live", enabled_connectors=set())
+    session.commit()
+
+    session.refresh(listing)
+    intelligence = (listing.metadata_json or {}).get("opportunity_intelligence") or {}
+    assert intelligence["freshness_label"] == "stale"
+    assert intelligence["evergreen_likelihood"] == "high"
+    assert "always hiring" in intelligence["evergreen_signals"]
+    assert "evergreen_high=1" in result.summary

@@ -11,6 +11,7 @@ from connectors.search_web import (
     _rewrite_query_for_provider_failover,
     _surface_acceptance_reason,
     build_search_queries,
+    classify_temporal_intelligence,
     classify_query_family,
     derive_search_results_from_extraction,
     extract_ats_identifiers_from_html,
@@ -204,3 +205,44 @@ def test_classify_query_family_captures_existing_query_mix() -> None:
     assert classify_query_family('"Acme" "chief of staff" careers') == "company_targeted"
     assert classify_query_family('"chief of staff" company careers') == "careers_broad"
     assert classify_query_family('"ai" startup jobs "chief of staff"') == "role_market"
+
+
+def test_classify_temporal_intelligence_marks_fresh_active_listing() -> None:
+    metrics = classify_temporal_intelligence(
+        title="Chief of Staff",
+        text="Recently posted strategic operator role.",
+        freshness_hours=18,
+        freshness_days=0,
+        listing_status="active",
+    )
+
+    assert metrics["freshness_label"] == "fresh"
+    assert metrics["is_fresh"] is True
+    assert metrics["is_stale"] is False
+    assert metrics["evergreen_likelihood"] == "low"
+
+
+def test_classify_temporal_intelligence_marks_stale_listing_from_age_and_status() -> None:
+    metrics = classify_temporal_intelligence(
+        title="Operations Lead",
+        text="Older role that may no longer be active.",
+        freshness_days=31,
+        listing_status="suspected_expired",
+    )
+
+    assert metrics["freshness_label"] == "stale"
+    assert metrics["is_stale"] is True
+    assert "listing status is suspected_expired" in metrics["staleness_reasons"]
+
+
+def test_classify_temporal_intelligence_marks_evergreen_listing_from_copy_and_age() -> None:
+    metrics = classify_temporal_intelligence(
+        title="General Application",
+        text="We are always hiring exceptional operators for future opportunities.",
+        freshness_days=60,
+        listing_status="active",
+    )
+
+    assert metrics["freshness_label"] == "stale"
+    assert metrics["evergreen_likelihood"] == "high"
+    assert "always hiring" in metrics["evergreen_signals"]

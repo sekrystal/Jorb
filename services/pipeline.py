@@ -10,6 +10,7 @@ from core.config import get_settings
 from core.logging import get_logger
 from core.models import AgentRun, FollowUpTask, Investigation, Lead, Listing, RunDigest, Signal
 from core.schemas import AgentRunResponse, ListingRecord, SignalRecord
+from connectors.search_web import classify_temporal_intelligence
 from services.activity import append_lead_agent_trace, log_agent_activity, log_agent_run
 from services.digests import record_run_digest
 from services.freshness import classify_freshness_label, validate_listing
@@ -127,6 +128,80 @@ def _coerce_datetime(value: str | None) -> datetime | None:
     if not value:
         return None
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def _build_listing_temporal_intelligence(listing: Listing) -> dict[str, object]:
+    metadata = dict(listing.metadata_json or {})
+    return classify_temporal_intelligence(
+        text=" ".join(
+            part
+            for part in [
+                listing.description_text,
+                metadata.get("page_text"),
+                metadata.get("job_summary"),
+            ]
+            if part
+        ),
+        title=listing.title,
+        url=listing.url,
+        freshness_days=listing.freshness_days,
+        freshness_hours=listing.freshness_hours,
+        listing_status=listing.listing_status,
+    )
+
+
+def _freshness_logic_note(intelligence: dict[str, object]) -> str:
+    freshness_label = intelligence.get("freshness_label", "unknown")
+    evergreen_likelihood = intelligence.get("evergreen_likelihood", "low")
+    freshness_reasons = list(intelligence.get("freshness_reasons") or [])
+    evergreen_reasons = list(intelligence.get("evergreen_reasons") or [])
+    stale_reasons = list(intelligence.get("staleness_reasons") or [])
+
+    reason_parts = freshness_reasons[:2]
+    if stale_reasons:
+        reason_parts.extend(stale_reasons[:1])
+    reason_text = ", ".join(dict.fromkeys(str(part) for part in reason_parts if part))
+    note = f"Freshness logic: {freshness_label}"
+    if reason_text:
+        note = f"{note} because {reason_text}"
+    if evergreen_reasons:
+        note = f"{note}; evergreen likelihood is {evergreen_likelihood} because {evergreen_reasons[0]}"
+    else:
+        note = f"{note}; evergreen likelihood is {evergreen_likelihood}"
+    return note + "."
+
+
+def _annotate_cycle_temporal_intelligence(session: Session, cycle_started_at: datetime) -> dict[str, int]:
+    listing_rows = session.scalars(select(Listing).where(Listing.updated_at >= cycle_started_at).order_by(Listing.updated_at.desc())).all()
+    listing_by_id = {listing.id: listing for listing in listing_rows}
+    metrics = {"fresh": 0, "recent": 0, "stale": 0, "unknown": 0, "evergreen_low": 0, "evergreen_medium": 0, "evergreen_high": 0}
+
+    for listing in listing_rows:
+        intelligence = _build_listing_temporal_intelligence(listing)
+        metadata = dict(listing.metadata_json or {})
+        metadata["opportunity_intelligence"] = intelligence
+        listing.metadata_json = metadata
+        metrics[str(intelligence.get("freshness_label", "unknown"))] += 1
+        metrics[f"evergreen_{intelligence.get('evergreen_likelihood', 'low')}"] += 1
+
+    lead_rows = session.scalars(select(Lead).where(Lead.updated_at >= cycle_started_at).order_by(Lead.updated_at.desc())).all()
+    for lead in lead_rows:
+        if not lead.listing_id:
+            continue
+        listing = listing_by_id.get(lead.listing_id)
+        if listing is None:
+            continue
+        intelligence = dict((listing.metadata_json or {}).get("opportunity_intelligence") or _build_listing_temporal_intelligence(listing))
+        evidence = dict(lead.evidence_json or {})
+        evidence["opportunity_intelligence"] = intelligence
+        evidence["freshness_logic_summary"] = intelligence.get("summary")
+        lead.evidence_json = evidence
+        note = _freshness_logic_note(intelligence)
+        if note not in (lead.explanation or ""):
+            lead.explanation = f"{(lead.explanation or '').strip()} {note}".strip()
+
+    session.flush()
+    return metrics
 
 
 def _insert_demo_batch(session: Session) -> tuple[int, int, list[Listing], list[Signal]]:
@@ -275,6 +350,7 @@ def run_scout_agent(
         inserted_leads = session.scalars(select(Lead).where(Lead.created_at >= cycle_started_at).order_by(Lead.created_at.desc())).all()
         listing_count = result.listings_ingested
         signal_count = result.signals_ingested
+    temporal_metrics = _annotate_cycle_temporal_intelligence(session, cycle_started_at)
     new_names = [f"{lead.company_name} / {lead.primary_title}" for lead in inserted_leads[:4]]
     mode_label = "live source data" if source_mode == "live" else "source data"
     discovery_suffix = f" {result.discovery_summary}" if result.discovery_summary else ""
@@ -284,9 +360,13 @@ def run_scout_agent(
             f" New companies discovered: {result.discovery_status.get('new_companies_discovered', 0)}. "
             f"Companies expanded: {result.discovery_status.get('companies_selected_for_expansion', 0)}."
         )
+    freshness_suffix = (
+        f" Freshness mix: fresh={temporal_metrics['fresh']}, recent={temporal_metrics['recent']}, "
+        f"stale={temporal_metrics['stale']}, evergreen_high={temporal_metrics['evergreen_high']}."
+    )
     summary = (
         f"Scout added {listing_count} listings and {signal_count} signals from {mode_label}. "
-        f"New rows: {', '.join(new_names) if new_names else 'none'}.{discovery_suffix}{discovery_memory_suffix}"
+        f"New rows: {', '.join(new_names) if new_names else 'none'}.{freshness_suffix}{discovery_suffix}{discovery_memory_suffix}"
     )
     log_agent_activity(
         session,
@@ -307,6 +387,7 @@ def run_scout_agent(
             "source_mode": source_mode,
             "listing_count": listing_count,
             "signal_count": signal_count,
+            "temporal_metrics": temporal_metrics,
             "discovery_metrics": result.discovery_metrics,
             "discovery_summary": result.discovery_summary,
             "discovery_status": result.discovery_status,

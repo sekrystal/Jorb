@@ -61,6 +61,19 @@ PROVIDER_SPECIFIC_QUERY_TERMS = (
     "greenhouse",
     "ashby",
 )
+EVERGREEN_HINT_PATTERNS = (
+    "evergreen",
+    "always hiring",
+    "hiring continuously",
+    "rolling basis",
+    "ongoing hiring",
+    "future opportunities",
+    "talent network",
+    "general application",
+    "open application",
+    "pipeline role",
+    "multiple openings",
+)
 
 
 def classify_query_family(query_text: str) -> str:
@@ -79,6 +92,93 @@ def classify_query_family(query_text: str) -> str:
             return "careers_broad"
         return "role_market"
     return "general"
+
+
+def classify_temporal_intelligence(
+    *,
+    text: str | None = None,
+    title: str | None = None,
+    url: str | None = None,
+    freshness_days: int | None = None,
+    freshness_hours: float | None = None,
+    listing_status: str | None = None,
+) -> dict[str, object]:
+    normalized_status = (listing_status or "unknown").strip().lower() or "unknown"
+    combined_text = " ".join(part for part in [title, text, url] if part).lower()
+    matched_evergreen_signals = [pattern for pattern in EVERGREEN_HINT_PATTERNS if pattern in combined_text]
+
+    if freshness_hours is None and freshness_days is not None:
+        freshness_hours = freshness_days * 24
+    if freshness_days is None and freshness_hours is not None:
+        freshness_days = int(freshness_hours // 24)
+
+    freshness_label = "unknown"
+    if freshness_hours is not None:
+        if freshness_hours <= 72:
+            freshness_label = "fresh"
+        elif freshness_hours <= 14 * 24:
+            freshness_label = "recent"
+        else:
+            freshness_label = "stale"
+
+    evergreen_score = 0
+    evergreen_reasons: list[str] = []
+    if matched_evergreen_signals:
+        evergreen_score += 2
+        evergreen_reasons.append(f"matched evergreen copy: {', '.join(matched_evergreen_signals[:3])}")
+    if normalized_status == "active" and freshness_days is not None and freshness_days >= 45:
+        evergreen_score += 2
+        evergreen_reasons.append("active posting older than 45 days")
+    elif normalized_status == "active" and freshness_days is not None and freshness_days >= 30:
+        evergreen_score += 1
+        evergreen_reasons.append("active posting older than 30 days")
+
+    evergreen_likelihood = "low"
+    if evergreen_score >= 4:
+        evergreen_likelihood = "high"
+    elif evergreen_score >= 2:
+        evergreen_likelihood = "medium"
+
+    stale_reasons: list[str] = []
+    is_stale = False
+    if normalized_status in {"expired", "suspected_expired"}:
+        is_stale = True
+        stale_reasons.append(f"listing status is {normalized_status}")
+    elif freshness_label == "stale":
+        is_stale = True
+        stale_reasons.append("posting age exceeds 14 days")
+
+    freshness_reasons: list[str] = []
+    if freshness_label == "fresh":
+        freshness_reasons.append("posting age is within 72 hours")
+    elif freshness_label == "recent":
+        freshness_reasons.append("posting age is within 14 days")
+    elif freshness_label == "stale":
+        freshness_reasons.append("posting age is older than 14 days")
+    else:
+        freshness_reasons.append("posting age is unknown")
+
+    if normalized_status != "unknown":
+        freshness_reasons.append(f"listing status is {normalized_status}")
+
+    summary_parts = [f"Freshness classified as {freshness_label}"]
+    if freshness_days is not None:
+        summary_parts.append(f"age={freshness_days}d")
+    if normalized_status != "unknown":
+        summary_parts.append(f"status={normalized_status}")
+    summary_parts.append(f"evergreen={evergreen_likelihood}")
+
+    return {
+        "freshness_label": freshness_label,
+        "is_fresh": freshness_label == "fresh" and normalized_status == "active",
+        "is_stale": is_stale,
+        "freshness_reasons": freshness_reasons,
+        "staleness_reasons": stale_reasons,
+        "evergreen_likelihood": evergreen_likelihood,
+        "evergreen_signals": matched_evergreen_signals,
+        "evergreen_reasons": evergreen_reasons,
+        "summary": "; ".join(summary_parts),
+    }
 
 
 @dataclass
