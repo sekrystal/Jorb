@@ -40,6 +40,11 @@ SENIORITY_KEYWORDS = {
     "vp": "executive",
 }
 PROFILE_SCHEMA_KEY = "structured_profile"
+PROFILE_MODEL_FIELDS = {
+    column.name
+    for column in CandidateProfile.__table__.columns
+    if column.name not in {"id", "created_at", "updated_at"}
+}
 
 
 def _match_known_terms(text: str, choices: list[str]) -> list[str]:
@@ -124,6 +129,9 @@ def get_candidate_profile(session: Session) -> CandidateProfile:
         excluded_titles_json=["intern", "new grad", "account executive"],
         preferred_domains_json=["ai", "developer tools", "infra"],
         preferred_locations_json=["san francisco", "new york", "remote"],
+        confirmed_skills_json=["stakeholder management", "sql", "cross-functional leadership"],
+        competencies_json=["operator judgment", "process design", "zero-to-one execution"],
+        explicit_preferences_json=["hands-on teams", "customer-facing work", "clear scope"],
         seniority_guess="senior",
         stage_preferences_json=["early-stage", "series a"],
         core_titles_json=["chief of staff", "founding operations lead"],
@@ -172,9 +180,7 @@ def profile_to_payload(profile: CandidateProfile) -> CandidateProfilePayload:
 def update_candidate_profile(session: Session, payload: CandidateProfilePayload) -> CandidateProfile:
     payload = _with_structured_profile(payload)
     profile = get_candidate_profile(session)
-    for key, value in payload.model_dump().items():
-        if key in {"profile_schema_version", "structured_profile_json"}:
-            continue
+    for key, value in _profile_model_values(payload).items():
         setattr(profile, key, value)
     profile.extracted_summary_json = _merge_structured_profile(profile.extracted_summary_json or {}, payload)
     session.flush()
@@ -242,4 +248,4 @@ def _merge_structured_profile(extracted_summary_json: dict, payload: CandidatePr
 
 
 def _profile_model_values(payload: CandidateProfilePayload) -> dict:
-    return payload.model_dump(exclude={"profile_schema_version", "structured_profile_json"})
+    return payload.model_dump(include=PROFILE_MODEL_FIELDS)

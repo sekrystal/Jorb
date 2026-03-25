@@ -38,6 +38,9 @@ def test_candidate_profile_payload_builds_structured_schema_from_flat_fields() -
         preferred_domains_json=["ai"],
         preferred_locations_json=["remote"],
         excluded_companies_json=["BigCo"],
+        confirmed_skills_json=["sql", "stakeholder management"],
+        competencies_json=["process design"],
+        explicit_preferences_json=["hands-on teams"],
         stage_preferences_json=["series a"],
         stretch_role_families_json=["operations"],
         excluded_keywords_json=["phd required"],
@@ -50,6 +53,9 @@ def test_candidate_profile_payload_builds_structured_schema_from_flat_fields() -
     assert payload.profile_schema_version == "v1"
     assert payload.structured_profile_json is not None
     assert payload.structured_profile_json.targeting.preferred_titles == ["chief of staff", "operator"]
+    assert payload.structured_profile_json.targeting.confirmed_skills == ["sql", "stakeholder management"]
+    assert payload.structured_profile_json.targeting.competencies == ["process design"]
+    assert payload.structured_profile_json.targeting.explicit_preferences == ["hands-on teams"]
     assert payload.structured_profile_json.targeting.seniority.maximum_band == "staff"
     assert payload.structured_profile_json.scoring.minimum_fit_threshold == 3.2
 
@@ -71,6 +77,9 @@ def test_update_candidate_profile_syncs_structured_schema_back_to_flat_fields() 
                 "preferred_domains": ["developer tools"],
                 "preferred_locations": ["san francisco"],
                 "excluded_companies": ["BigCo"],
+                "confirmed_skills": ["customer discovery", "sql"],
+                "competencies": ["systems thinking"],
+                "explicit_preferences": ["small teams", "remote-friendly"],
                 "stage_preferences": ["seed"],
                 "stretch_role_families": ["go_to_market"],
                 "excluded_keywords": ["clearance required"],
@@ -87,8 +96,14 @@ def test_update_candidate_profile_syncs_structured_schema_back_to_flat_fields() 
     assert profile.stage_preferences_json == ["seed"]
     assert profile.minimum_fit_threshold == 3.4
     assert profile.extracted_summary_json["structured_profile"]["scoring"]["minimum_fit_threshold"] == 3.4
+    assert profile.extracted_summary_json["structured_profile"]["targeting"]["confirmed_skills"] == ["customer discovery", "sql"]
+    assert profile.extracted_summary_json["structured_profile"]["targeting"]["competencies"] == ["systems thinking"]
+    assert profile.extracted_summary_json["structured_profile"]["targeting"]["explicit_preferences"] == ["small teams", "remote-friendly"]
     assert refreshed.structured_profile_json is not None
     assert refreshed.structured_profile_json.targeting.preferred_domains == ["developer tools"]
+    assert refreshed.confirmed_skills_json == ["customer discovery", "sql"]
+    assert refreshed.competencies_json == ["systems thinking"]
+    assert refreshed.explicit_preferences_json == ["small teams", "remote-friendly"]
 
 
 def test_text_resume_upload_extraction() -> None:

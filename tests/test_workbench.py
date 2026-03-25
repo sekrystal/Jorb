@@ -240,6 +240,9 @@ def test_build_profile_update_payload_preserves_extracted_resume_draft_fields() 
             "preferred_domains": "ai",
             "excluded_companies": "BigCo",
             "preferred_locations": "remote",
+            "confirmed_skills": "sql, stakeholder management",
+            "competencies": "process design, operator judgment",
+            "explicit_preferences": "hands-on teams, customer-facing work",
             "stage_preferences": "series a",
             "core_titles": "chief of staff",
             "excluded_keywords": "clearance required",
@@ -255,4 +258,7 @@ def test_build_profile_update_payload_preserves_extracted_resume_draft_fields() 
     assert payload["extracted_summary_json"]["resume_filename"] == "resume.pdf"
     assert payload["extracted_summary_json"]["extraction_status"] == "partial"
     assert payload["preferred_titles_json"] == ["chief of staff", "operator"]
+    assert payload["confirmed_skills_json"] == ["sql", "stakeholder management"]
+    assert payload["competencies_json"] == ["process design", "operator judgment"]
+    assert payload["explicit_preferences_json"] == ["hands-on teams", "customer-facing work"]
     assert payload["seniority_guess"] == "senior"

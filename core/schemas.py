@@ -69,6 +69,9 @@ class CandidateProfilePayload(BaseModel):
     preferred_domains_json: list[str] = Field(default_factory=list)
     excluded_companies_json: list[str] = Field(default_factory=list)
     preferred_locations_json: list[str] = Field(default_factory=list)
+    confirmed_skills_json: list[str] = Field(default_factory=list)
+    competencies_json: list[str] = Field(default_factory=list)
+    explicit_preferences_json: list[str] = Field(default_factory=list)
     seniority_guess: Optional[str] = None
     stage_preferences_json: list[str] = Field(default_factory=list)
     core_titles_json: list[str] = Field(default_factory=list)
@@ -92,6 +95,9 @@ class CandidateProfilePayload(BaseModel):
                     preferred_domains=self.preferred_domains_json,
                     preferred_locations=self.preferred_locations_json,
                     excluded_companies=self.excluded_companies_json,
+                    confirmed_skills=self.confirmed_skills_json,
+                    competencies=self.competencies_json,
+                    explicit_preferences=self.explicit_preferences_json,
                     stage_preferences=self.stage_preferences_json,
                     stretch_role_families=self.stretch_role_families_json,
                     excluded_keywords=self.excluded_keywords_json,
@@ -113,6 +119,9 @@ class CandidateProfilePayload(BaseModel):
             self.preferred_domains_json = list(targeting.preferred_domains)
             self.preferred_locations_json = list(targeting.preferred_locations)
             self.excluded_companies_json = list(targeting.excluded_companies)
+            self.confirmed_skills_json = list(targeting.confirmed_skills)
+            self.competencies_json = list(targeting.competencies)
+            self.explicit_preferences_json = list(targeting.explicit_preferences)
             self.stage_preferences_json = list(targeting.stage_preferences)
             self.stretch_role_families_json = list(targeting.stretch_role_families)
             self.excluded_keywords_json = list(targeting.excluded_keywords)
@@ -137,6 +146,9 @@ class ProfileTargetingPreferences(BaseModel):
     preferred_domains: list[str] = Field(default_factory=list)
     preferred_locations: list[str] = Field(default_factory=list)
     excluded_companies: list[str] = Field(default_factory=list)
+    confirmed_skills: list[str] = Field(default_factory=list)
+    competencies: list[str] = Field(default_factory=list)
+    explicit_preferences: list[str] = Field(default_factory=list)
     stage_preferences: list[str] = Field(default_factory=list)
     stretch_role_families: list[str] = Field(default_factory=list)
     excluded_keywords: list[str] = Field(default_factory=list)

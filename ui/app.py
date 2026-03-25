@@ -100,6 +100,9 @@ def build_profile_update_payload(
         "preferred_domains_json": parse_csv(form_values["preferred_domains"]),
         "excluded_companies_json": parse_csv(form_values["excluded_companies"]),
         "preferred_locations_json": parse_csv(form_values["preferred_locations"]),
+        "confirmed_skills_json": parse_csv(form_values["confirmed_skills"]),
+        "competencies_json": parse_csv(form_values["competencies"]),
+        "explicit_preferences_json": parse_csv(form_values["explicit_preferences"]),
         "seniority_guess": form_source.get("seniority_guess", profile.get("seniority_guess")),
         "stage_preferences_json": parse_csv(form_values["stage_preferences"]),
         "core_titles_json": parse_csv(form_values["core_titles"]),
@@ -560,6 +563,9 @@ def render_profile_tab(profile: dict[str, Any], learning: dict[str, Any]) -> Non
         preferred_domains = st.text_input("Preferred domains", value=", ".join(review_profile.get("preferred_domains_json", [])))
         preferred_locations = st.text_input("Preferred locations", value=", ".join(review_profile.get("preferred_locations_json", [])))
         excluded_companies = st.text_input("Excluded companies", value=", ".join(review_profile.get("excluded_companies_json", [])))
+        confirmed_skills = st.text_input("Confirmed skills", value=", ".join(review_profile.get("confirmed_skills_json", [])))
+        competencies = st.text_input("Competencies", value=", ".join(review_profile.get("competencies_json", [])))
+        explicit_preferences = st.text_input("Explicit preferences", value=", ".join(review_profile.get("explicit_preferences_json", [])))
         stage_preferences = st.text_input("Preferred stages", value=", ".join(review_profile.get("stage_preferences_json", [])))
         stretch_role_families = st.text_input("Stretch role families", value=", ".join(review_profile.get("stretch_role_families_json", [])))
         excluded_keywords = st.text_input("Excluded keywords", value=", ".join(review_profile.get("excluded_keywords_json", [])))
@@ -587,6 +593,9 @@ def render_profile_tab(profile: dict[str, Any], learning: dict[str, Any]) -> Non
                     "preferred_domains": preferred_domains,
                     "excluded_companies": excluded_companies,
                     "preferred_locations": preferred_locations,
+                    "confirmed_skills": confirmed_skills,
+                    "competencies": competencies,
+                    "explicit_preferences": explicit_preferences,
                     "stage_preferences": stage_preferences,
                     "core_titles": core_titles,
                     "excluded_keywords": excluded_keywords,
