@@ -14,9 +14,11 @@ from sqlalchemy.orm import Session
 from connectors.ashby import AshbyConnector
 from connectors.greenhouse import GreenhouseConnector
 from connectors.search_web import (
+    SearchDiscoveryResult,
     SearchDiscoveryConnector,
     build_search_queries,
     classify_query_family,
+    derive_search_results_from_extraction,
     extract_direct_listing_from_html,
     fetch_page_snapshot,
 )
@@ -166,33 +168,95 @@ def _expansion_fallback_diagnostics(
     *,
     result_count: int,
     blocked_reason: str | None,
+    fallback_state: dict[str, object] | None = None,
 ) -> dict[str, object]:
     metadata = dict(row.metadata_json or {})
     careers_url = metadata.get("careers_url")
     discovered_urls = list(metadata.get("discovered_urls") or [])
     scrape_candidates = [url for url in [careers_url, *discovered_urls] if url]
-    scrape_attempted = bool(scrape_candidates) or candidate.board_type == "careers_page"
+    state = fallback_state or {}
+    scrape_attempted = bool(state.get("scrape_parse_attempted")) or candidate.board_type == "careers_page"
     diagnostics = {
         "fallback_order": ["structured_connector_poll", "scrape_parse_fallback"],
         "scrape_parse_attempted": scrape_attempted,
         "scrape_parse_candidate_urls": scrape_candidates[:5],
+        "scrape_parse_extraction_count": int(state.get("scrape_parse_extraction_count", 0) or 0),
+        "scrape_parse_derived_candidate_count": int(state.get("scrape_parse_derived_candidate_count", 0) or 0),
+        "scrape_parse_recovered_result_count": int(state.get("scrape_parse_recovered_result_count", 0) or 0),
     }
     if candidate.board_type == "careers_page":
         diagnostics["primary_path"] = "scrape_parse_only"
         diagnostics["scrape_parse_status"] = "no_ats_identifiers_extracted" if result_count == 0 else "careers_surface_selected"
     elif result_count > 0:
         diagnostics["primary_path"] = "structured_connector_poll"
-        diagnostics["scrape_parse_status"] = "not_needed"
+        if scrape_attempted:
+            diagnostics["scrape_parse_status"] = "recovered_via_scrape_parse_fallback"
+        else:
+            diagnostics["scrape_parse_status"] = "not_needed"
     elif blocked_reason == "investigate":
         diagnostics["primary_path"] = "structured_connector_poll"
         diagnostics["scrape_parse_status"] = "blocked_pending_investigation"
     elif scrape_attempted:
         diagnostics["primary_path"] = "structured_connector_poll"
-        diagnostics["scrape_parse_status"] = "attempted_before_empty_connector_yield"
+        diagnostics["scrape_parse_status"] = "no_ats_identifiers_extracted"
     else:
         diagnostics["primary_path"] = "structured_connector_poll"
         diagnostics["scrape_parse_status"] = "not_applicable"
     return diagnostics
+
+
+def _build_structured_zero_yield_fallback_results(
+    selected_discoveries: list[tuple],
+    *,
+    greenhouse_job_counts: dict[str, int],
+    ashby_job_counts: Counter,
+) -> tuple[list[SearchDiscoveryResult], dict[str, dict[str, object]], dict[str, set[str]]]:
+    fallback_results: list[SearchDiscoveryResult] = []
+    fallback_state_by_key: dict[str, dict[str, object]] = {}
+    url_to_discovery_keys: dict[str, set[str]] = defaultdict(set)
+    seen_urls: set[str] = set()
+
+    for candidate, row, _, _ in selected_discoveries:
+        if candidate.board_type == "greenhouse":
+            result_count = int(greenhouse_job_counts.get(candidate.board_locator, 0))
+        elif candidate.board_type == "ashby":
+            result_count = int(ashby_job_counts.get(candidate.board_locator, 0))
+        else:
+            continue
+        if result_count > 0:
+            continue
+
+        metadata = dict(row.metadata_json or {})
+        raw_urls = [metadata.get("careers_url"), *list(metadata.get("discovered_urls") or [])]
+        candidate_urls: list[str] = []
+        for url in raw_urls:
+            normalized_url = str(url or "").strip()
+            if not normalized_url or normalized_url in candidate_urls:
+                continue
+            candidate_urls.append(normalized_url)
+        fallback_state_by_key[row.discovery_key] = {
+            "scrape_parse_attempted": False,
+            "scrape_parse_extraction_count": 0,
+            "scrape_parse_derived_candidate_count": 0,
+            "scrape_parse_recovered_result_count": 0,
+            "scrape_parse_candidate_urls": candidate_urls[:5],
+        }
+        for url in candidate_urls:
+            url_to_discovery_keys[url].add(row.discovery_key)
+            if url in seen_urls:
+                continue
+            seen_urls.add(url)
+            fallback_results.append(
+                SearchDiscoveryResult(
+                    query_text=candidate.discovery_query,
+                    title=candidate.result_title,
+                    url=url,
+                    source_surface="structured_zero_yield_fallback",
+                    query_family=candidate.query_family or "unknown",
+                )
+            )
+
+    return fallback_results, fallback_state_by_key, url_to_discovery_keys
 
 
 def _source_learning(profile) -> dict:
@@ -915,6 +979,7 @@ def sync_all(
     discovered_greenhouse_queries: dict[str, list[str]] = {}
     discovered_ashby_queries: dict[str, list[str]] = {}
     discovered_yc_jobs: dict[str, dict[str, object]] = {}
+    structured_fallback_state_by_key: dict[str, dict[str, object]] = {}
     discovery_metrics: dict[str, dict[str, int]] = {}
     discovery_status: dict[str, object] = {}
     cycle_metrics: Counter[str] = Counter()
@@ -1502,6 +1567,138 @@ def sync_all(
                 yielded_results=len(ashby_jobs),
                 status="jobs_returned" if ashby_jobs else "empty_jobs",
             )
+    greenhouse_job_counts = dict(getattr(greenhouse_connector, "last_board_counts", {}) or {})
+    ashby_job_counts = Counter(job.get("source_org_key") for job in ashby_jobs if job.get("source_org_key"))
+    fallback_seed_results, structured_fallback_state_by_key, fallback_url_to_discovery_keys = _build_structured_zero_yield_fallback_results(
+        selected_discoveries,
+        greenhouse_job_counts=greenhouse_job_counts,
+        ashby_job_counts=ashby_job_counts,
+    )
+    if fallback_seed_results:
+        fallback_seed_by_url = {result.url: result for result in fallback_seed_results}
+        fallback_origin_by_derived_key: dict[str, set[str]] = defaultdict(set)
+        for state in structured_fallback_state_by_key.values():
+            state["scrape_parse_attempted"] = True
+        fallback_extractions, fallback_derived_results = extractor_agent(fallback_seed_results, settings=settings)
+        cycle_metrics["scrape_parse_extraction_count"] += len(fallback_extractions)
+        cycle_metrics["scrape_parse_derived_result_count"] += len(fallback_derived_results)
+        _record_source_runtime_observer(
+            source_runtime_observer,
+            "search_web_scrape_fallback",
+            attempted=True,
+            zero_yield=len(fallback_derived_results) == 0,
+            yielded_results=len(fallback_derived_results),
+            fallback_used=True,
+            fallback_order=["structured_connector_poll", "scrape_parse_fallback"],
+            status="derived_candidates" if fallback_derived_results else "no_ats_identifiers_extracted",
+        )
+        for extraction in fallback_extractions:
+            related_keys = set(fallback_url_to_discovery_keys.get(extraction.source_url, set()))
+            related_keys.update(fallback_url_to_discovery_keys.get(extraction.final_url, set()))
+            for discovery_key in related_keys:
+                state = structured_fallback_state_by_key.setdefault(
+                    discovery_key,
+                    {
+                        "scrape_parse_attempted": False,
+                        "scrape_parse_extraction_count": 0,
+                        "scrape_parse_derived_candidate_count": 0,
+                        "scrape_parse_recovered_result_count": 0,
+                        "scrape_parse_candidate_urls": [],
+                    },
+                )
+                state["scrape_parse_attempted"] = True
+                state["scrape_parse_extraction_count"] = int(state.get("scrape_parse_extraction_count", 0) or 0) + 1
+                seed_result = fallback_seed_by_url.get(extraction.source_url) or fallback_seed_by_url.get(extraction.final_url)
+                if seed_result is not None:
+                    derived_candidates = derive_search_results_from_extraction(
+                        seed_result.query_text,
+                        extraction,
+                        source_surface="structured_zero_yield_fallback",
+                    )
+                    state["scrape_parse_derived_candidate_count"] = int(
+                        state.get("scrape_parse_derived_candidate_count", 0) or 0
+                    ) + len(derived_candidates)
+                    for derived_candidate in derived_candidates:
+                        mapped_candidate = candidate_from_search_result(derived_candidate)
+                        if mapped_candidate is None:
+                            continue
+                        fallback_origin_by_derived_key[mapped_candidate.discovery_key].add(discovery_key)
+
+        fallback_greenhouse_queries: dict[str, list[str]] = {}
+        fallback_ashby_queries: dict[str, list[str]] = {}
+        configured_greenhouse_tokens = {token.lower() for token in settings.greenhouse_tokens}
+        configured_ashby_orgs = {org.lower() for org in settings.ashby_orgs}
+        for result in fallback_derived_results:
+            candidate = candidate_from_search_result(result)
+            if candidate is None:
+                continue
+            if candidate.board_type == "greenhouse":
+                locator = candidate.board_locator
+                if locator.lower() in configured_greenhouse_tokens or locator in discovered_greenhouse_queries:
+                    continue
+                fallback_greenhouse_queries.setdefault(locator, [result.query_text])
+            elif candidate.board_type == "ashby":
+                locator = candidate.board_locator
+                if locator.lower() in configured_ashby_orgs or locator in discovered_ashby_queries:
+                    continue
+                fallback_ashby_queries.setdefault(locator, [result.query_text])
+
+        if "greenhouse" in enabled_connectors and fallback_greenhouse_queries:
+            fallback_greenhouse_jobs, greenhouse_live, _ = run_connector_fetch(
+                session,
+                "greenhouse",
+                partial(
+                    greenhouse_connector.fetch,
+                    "greenhouse" in strict_live_connectors,
+                    list(fallback_greenhouse_queries),
+                    fallback_greenhouse_queries,
+                ),
+                date_fields=["updated_at", "absolute_url", "first_published"],
+            )
+            greenhouse_jobs.extend(fallback_greenhouse_jobs)
+            for job in fallback_greenhouse_jobs:
+                discovery_key = f"greenhouse:{str(job.get('source_board_token') or '').lower()}"
+                for origin_key in fallback_origin_by_derived_key.get(discovery_key, set()):
+                    state = structured_fallback_state_by_key.setdefault(origin_key, {})
+                    state["scrape_parse_recovered_result_count"] = int(state.get("scrape_parse_recovered_result_count", 0) or 0) + 1
+            _record_source_runtime_observer(
+                source_runtime_observer,
+                "greenhouse",
+                attempted=True,
+                zero_yield=len(fallback_greenhouse_jobs) == 0,
+                yielded_results=len(fallback_greenhouse_jobs),
+                fallback_used=True,
+                fallback_order=["structured_connector_poll", "scrape_parse_fallback"],
+                status="jobs_returned" if fallback_greenhouse_jobs else "empty_jobs",
+            )
+        if "ashby" in enabled_connectors and fallback_ashby_queries:
+            fallback_ashby_jobs, ashby_live, _ = run_connector_fetch(
+                session,
+                "ashby",
+                partial(
+                    ashby_connector.fetch,
+                    "ashby" in strict_live_connectors,
+                    list(fallback_ashby_queries),
+                    fallback_ashby_queries,
+                ),
+                date_fields=["publishedDate"],
+            )
+            ashby_jobs.extend(fallback_ashby_jobs)
+            for job in fallback_ashby_jobs:
+                discovery_key = f"ashby:{str(job.get('source_org_key') or '').lower()}"
+                for origin_key in fallback_origin_by_derived_key.get(discovery_key, set()):
+                    state = structured_fallback_state_by_key.setdefault(origin_key, {})
+                    state["scrape_parse_recovered_result_count"] = int(state.get("scrape_parse_recovered_result_count", 0) or 0) + 1
+            _record_source_runtime_observer(
+                source_runtime_observer,
+                "ashby",
+                attempted=True,
+                zero_yield=len(fallback_ashby_jobs) == 0,
+                yielded_results=len(fallback_ashby_jobs),
+                fallback_used=True,
+                fallback_order=["structured_connector_poll", "scrape_parse_fallback"],
+                status="jobs_returned" if fallback_ashby_jobs else "empty_jobs",
+            )
     for discovery_key, payload in discovered_yc_jobs.items():
         try:
             final_url, html = fetch_page_snapshot(str(payload["result_url"]))
@@ -1562,7 +1759,7 @@ def sync_all(
             yielded_results=len(yc_jobs),
             status="normalized" if yc_jobs else "direct_job_unparseable",
         )
-    greenhouse_job_counts = dict(getattr(greenhouse_connector, "last_board_counts", {}) or {})
+    greenhouse_job_counts = Counter((job.get("source_board_token") or "").lower() for job in greenhouse_jobs if job.get("source_board_token"))
     ashby_job_counts = Counter(job.get("source_org_key") for job in ashby_jobs if job.get("source_org_key"))
     ashby_org_statuses = dict(getattr(ashby_connector, "last_org_statuses", {}) or {})
     yc_job_keys = {f"yc_jobs:{job.get('source_job_id')}" for job in yc_jobs if job.get("source_job_id")}
@@ -1587,10 +1784,12 @@ def sync_all(
         job["surface_provenance"] = provenance
         job["source_lineage"] = source_lineage_for_surface("ashby", provenance, job.get("discovery_source"))
     for candidate, row, score, reasons in selected_discoveries:
+        fallback_state = structured_fallback_state_by_key.get(row.discovery_key) or {}
+        fallback_result_count = int(fallback_state.get("scrape_parse_recovered_result_count", 0) or 0)
         if candidate.board_type == "greenhouse":
-            result_count = greenhouse_job_counts.get(candidate.board_locator, 0)
+            result_count = int(greenhouse_job_counts.get(candidate.board_locator, 0)) + fallback_result_count
         elif candidate.board_type == "ashby":
-            result_count = int(ashby_job_counts.get(candidate.board_locator, 0))
+            result_count = int(ashby_job_counts.get(candidate.board_locator, 0)) + fallback_result_count
         elif candidate.board_type == "yc_jobs":
             result_count = 1 if candidate.discovery_key in yc_job_keys else 0
         else:
@@ -1615,6 +1814,7 @@ def sync_all(
                 row,
                 result_count=result_count,
                 blocked_reason=blocked_reason,
+                fallback_state=fallback_state,
             )
         )
         if candidate.board_type == "ashby":

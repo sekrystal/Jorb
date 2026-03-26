@@ -5,9 +5,10 @@ from datetime import datetime, timedelta
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from connectors.search_web import SearchDiscoveryResult
+from connectors.search_web import ATSExtractionResult, SearchDiscoveryResult
 from core.config import Settings
-from core.models import AgentRun, Base, CandidateProfile
+from core.models import AgentRun, Base, CandidateProfile, Listing
+import services.sync as sync_service
 from services.company_discovery import (
     build_discovery_source_matrix,
     build_discovery_status,
@@ -552,3 +553,148 @@ def test_discovery_status_includes_latest_empty_expansion_for_older_company() ->
 
     assert old_row.company_name not in {item.company_name for item in status.recent_items}
     assert old_row.company_name in {item.company_name for item in status.blocked_or_cooled_down}
+
+
+def test_sync_all_runs_scrape_fallback_after_zero_yield_structured_expansion(monkeypatch) -> None:
+    session = _session()
+    _profile(session)
+
+    monkeypatch.setattr(sync_service, "get_candidate_profile", lambda _session: session.query(CandidateProfile).first())
+    monkeypatch.setattr(sync_service, "ensure_source_queries", lambda _session: [])
+    monkeypatch.setattr(sync_service, "generate_follow_up_tasks", lambda _session: 0)
+    monkeypatch.setattr(
+        sync_service,
+        "planner_agent",
+        lambda *_args, **_kwargs: {
+            "queries": ['"Acme" "operations lead" careers'],
+            "query_themes": ["company_targeted"],
+            "company_archetypes": [],
+            "priority_notes": [],
+        },
+    )
+    monkeypatch.setattr(sync_service, "learning_agent", lambda *_args, **_kwargs: {"next_queries": [], "focus_companies": [], "notes": []})
+    monkeypatch.setattr(sync_service, "triage_agent", lambda **_kwargs: (3.8, ["deterministic test"], "pursue"))
+
+    extractor_calls: list[list[str]] = []
+
+    def fake_extractor(results, settings=None):
+        extractor_calls.append([result.url for result in results])
+        if len(extractor_calls) == 1:
+            return (
+                [
+                    ATSExtractionResult(
+                        source_url="https://acme.ai/careers",
+                        final_url="https://acme.ai/careers",
+                        page_title="Acme Careers",
+                        company_name="Acme",
+                        careers_url="https://acme.ai/careers",
+                        ats_type="greenhouse",
+                        greenhouse_tokens=["acme"],
+                        ashby_identifiers=[],
+                        discovered_urls=[],
+                        geography_hints=["remote us"],
+                        confidence=0.61,
+                        via_openai=False,
+                    )
+                ],
+                [
+                    SearchDiscoveryResult(
+                        query_text='"Acme" "operations lead" careers',
+                        title="Acme Careers [greenhouse:acme]",
+                        url="https://job-boards.greenhouse.io/acme/jobs",
+                        source_surface="search_web_crawl",
+                        query_family="company_targeted",
+                    )
+                ],
+            )
+        return (
+            [
+                ATSExtractionResult(
+                    source_url="https://acme.ai/careers",
+                    final_url="https://acme.ai/careers",
+                    page_title="Acme Careers",
+                    company_name="Acme",
+                    careers_url="https://acme.ai/careers",
+                    ats_type="ashby",
+                    greenhouse_tokens=[],
+                    ashby_identifiers=["acme-alt"],
+                    discovered_urls=[],
+                    geography_hints=["remote us"],
+                    confidence=0.54,
+                    via_openai=False,
+                )
+            ],
+            [
+                SearchDiscoveryResult(
+                    query_text='"Acme" "operations lead" careers',
+                    title="Acme Careers [ashby:acme-alt]",
+                    url="https://jobs.ashbyhq.com/acme-alt",
+                    source_surface="structured_zero_yield_fallback",
+                    query_family="company_targeted",
+                )
+            ],
+        )
+
+    monkeypatch.setattr(sync_service, "extractor_agent", fake_extractor)
+
+    def fake_run_connector_fetch(_session, connector_name, fetch_fn, date_fields=None):
+        if connector_name == "search_web":
+            return (
+                [
+                    SearchDiscoveryResult(
+                        query_text='"Acme" "operations lead" careers',
+                        title="Acme Careers",
+                        url="https://acme.ai/careers",
+                        query_family="company_targeted",
+                    )
+                ],
+                True,
+                None,
+            )
+        if connector_name == "greenhouse":
+            return [], True, None
+        if connector_name == "ashby":
+            return (
+                [
+                    {
+                        "companyName": "Acme",
+                        "companyDomain": "acme.ai",
+                        "title": "Operations Lead",
+                        "jobUrl": "https://jobs.ashbyhq.com/acme-alt/123",
+                        "applyUrl": "https://jobs.ashbyhq.com/acme-alt/123",
+                        "publishedDate": "2026-03-24T00:00:00Z",
+                        "updatedAt": "2026-03-24T00:00:00Z",
+                        "location": {"location": "Remote US"},
+                        "descriptionPlain": "Own operating cadence and cross-functional execution.",
+                        "id": "123",
+                        "source_org_key": "acme-alt",
+                        "source_queries": ['"Acme" "operations lead" careers'],
+                        "discovery_source": "structured_zero_yield_fallback",
+                    }
+                ],
+                True,
+                None,
+            )
+        return [], False, None
+
+    monkeypatch.setattr(sync_service, "run_connector_fetch", fake_run_connector_fetch)
+    monkeypatch.setattr(
+        sync_service,
+        "get_settings",
+        lambda: Settings(search_discovery_enabled=True, greenhouse_enabled=True, ashby_enabled=True),
+    )
+
+    result = sync_service.sync_all(session, enabled_connectors={"search_web", "greenhouse", "ashby"})
+
+    company = session.query(sync_service.CompanyDiscovery).filter(sync_service.CompanyDiscovery.discovery_key == "greenhouse:acme").one()
+    listing = session.query(Listing).filter(Listing.url == "https://jobs.ashbyhq.com/acme-alt/123").one()
+
+    assert len(extractor_calls) == 2
+    assert extractor_calls[1] == ["https://acme.ai/careers"]
+    assert company.metadata_json["expansion_diagnostics"]["scrape_parse_attempted"] is True
+    assert company.metadata_json["expansion_diagnostics"]["scrape_parse_derived_candidate_count"] == 1
+    assert company.metadata_json["expansion_diagnostics"]["scrape_parse_status"] == "recovered_via_scrape_parse_fallback"
+    assert company.metadata_json["expansion_diagnostics"]["surface_status"] == "jobs_returned"
+    assert company.last_expansion_result_count == 1
+    assert result.discovery_status["cycle_metrics"]["scrape_parse_extraction_count"] == 2
+    assert listing.source_type == "ashby"
