@@ -505,7 +505,7 @@ Reset behavior:
 ## Local Run
 
 ```bash
-cd /Users/samuelkrystal/Huntr/opportunity-scout
+cd /Users/samuelkrystal/projects/jorb
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
@@ -517,10 +517,27 @@ uvicorn api.main:app --host 127.0.0.1 --port 8000
 In a second terminal:
 
 ```bash
-cd /Users/samuelkrystal/Huntr/opportunity-scout
+cd /Users/samuelkrystal/projects/jorb
 source .venv/bin/activate
 streamlit run ui/app.py --server.headless true --server.address 127.0.0.1 --server.port 8500
 ```
+
+In a third terminal, bootstrap the production JS shell:
+
+```bash
+cd /Users/samuelkrystal/projects/jorb/frontend
+npm install
+npm run dev
+```
+
+Production JS shell notes:
+
+- framework choice: Vite + React + TypeScript
+- primary product route: `http://127.0.0.1:5173/jobs`
+- dev API wiring: the Vite proxy forwards `/api/*` to `http://127.0.0.1:8000/*`
+- backend contract pattern: the JS client reads `/opportunities`, `/candidate-profile`, and `/applications/status`
+- Streamlit remains the temporary validation harness for operator and diagnostic surfaces at `http://127.0.0.1:8500`
+- the JS shell intentionally does not expose `source matrix`, `discovery internals`, `learning`, `autonomy ops`, `agent activity`, `investigations`, `diagnostics`, or `operator controls` as product entry points
 
 Portable SQLite config:
 
@@ -580,6 +597,7 @@ pytest
 - live X ingestion is still intentionally limited
 - PDF extraction depends on text being extractable from the source PDF
 - Streamlit provides a practical workbench, not a full spreadsheet engine
+- the production JS shell is currently a skeletal frame, not yet full Figma fidelity
 - scheduled autonomy is local and sequential, not distributed infrastructure
 - unattended demo mode is reasonable for bounded local cycles, but still benefits from human review before long-running live use
 - live connectors remain the main barrier to true set-and-forget autonomy

@@ -26,6 +26,8 @@ sudo systemctl restart opportunity-scout-worker.service
 sudo systemctl restart opportunity-scout-ui.service
 ```
 
+If the production JS shell is deployed separately, restart it after API env or routing changes so the frontend proxy and asset bundle stay aligned with the same backend release.
+
 After changing `/etc/opportunity-scout/opportunity-scout.env`, restart in this order so both processes pick up the same cached config:
 
 ```bash
@@ -34,6 +36,8 @@ sudo systemctl restart opportunity-scout-api.service
 sudo systemctl restart opportunity-scout-worker.service
 sudo systemctl restart opportunity-scout-ui.service
 ```
+
+If you also run the Vite-based JS shell locally, restart `npm run dev` after changing `VITE_API_BASE_URL` or backend host assumptions.
 
 Both the API and the worker cache settings in-process, and the database engine is bound at process start. Env changes do not apply until restart.
 

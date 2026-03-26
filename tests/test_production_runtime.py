@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta
+from pathlib import Path
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -130,3 +132,30 @@ def test_connector_success_can_be_approved_for_unattended() -> None:
     )
     assert row.status == "healthy"
     assert row.approved_for_unattended is True
+
+
+def test_frontend_shell_uses_product_first_routes_and_streamlit_secondary_path() -> None:
+    router_source = Path("frontend/src/router.tsx").read_text()
+    shell_source = Path("frontend/src/shell/AppShell.tsx").read_text()
+
+    assert 'Navigate to="/jobs"' in router_source
+    assert '{ path: "jobs", element: <JobsPage /> }' in router_source
+    assert '{ path: "validation-harness", element: <ValidationHarnessPage /> }' in router_source
+    assert "Agent Activity" not in shell_source
+    assert "Autonomy Ops" not in shell_source
+    assert "Validation Harness" in shell_source
+
+
+def test_frontend_shell_dev_wiring_targets_existing_fastapi_backend() -> None:
+    package_json = json.loads(Path("frontend/package.json").read_text())
+    vite_config = Path("frontend/vite.config.ts").read_text()
+    api_client = Path("frontend/src/lib/api.ts").read_text()
+    readme = Path("README.md").read_text()
+
+    assert package_json["scripts"]["dev"] == "vite --host 127.0.0.1 --port 5173"
+    assert 'target: "http://127.0.0.1:8000"' in vite_config
+    assert 'path.replace(/^\\/api/, "")' in vite_config
+    assert "/opportunities" in api_client
+    assert '"/candidate-profile"' in api_client
+    assert '"/applications/status"' in api_client
+    assert "Streamlit remains the temporary validation harness" in readme
