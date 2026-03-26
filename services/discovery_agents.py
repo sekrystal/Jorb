@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 from collections import Counter
+from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Callable, Optional
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from connectors.search_web import (
     ATSExtractionResult,
+    SearchDiscoveryConnector,
     SearchDiscoveryResult,
     build_search_queries,
     classify_query_family,
@@ -37,8 +39,42 @@ ROLE_SYNONYMS = {
 }
 
 
+@dataclass
+class AcquisitionWorkerExecution:
+    worker_name: str
+    query_texts: list[str]
+    results: list[SearchDiscoveryResult]
+    live: bool
+    diagnostics: dict[str, object]
+    extractions: list[ATSExtractionResult] | None = None
+    derived_results: list[SearchDiscoveryResult] | None = None
+
+    def summary(self) -> dict[str, object]:
+        payload = {
+            "worker_name": self.worker_name,
+            "query_count": len(self.query_texts),
+            "queries": self.query_texts,
+            "result_count": len(self.results),
+            "candidate_urls": [result.url for result in self.results[:10]],
+            "live": self.live,
+            "diagnostics": self.diagnostics,
+        }
+        if self.extractions is not None:
+            payload["extraction_count"] = len(self.extractions)
+        if self.derived_results is not None:
+            payload["derived_result_count"] = len(self.derived_results)
+            payload["derived_candidate_urls"] = [result.url for result in (self.derived_results or [])[:10]]
+        return payload
+
+
 def _dedupe_strings(values: list[str]) -> list[str]:
     return list(dict.fromkeys(value.strip() for value in values if value and value.strip()))
+
+
+def _bounded_worker_queries(values: list[str], limit: int) -> list[str]:
+    if limit <= 0:
+        return []
+    return _dedupe_strings(values)[:limit]
 
 
 def _top_geographies(preferred_locations: list[str]) -> list[str]:
@@ -280,6 +316,95 @@ def planner_agent(session: Session, profile: CandidateProfile, settings: Setting
     return plan
 
 
+def build_acquisition_plan(planner_plan: dict, settings: Settings | None = None) -> dict[str, list[str]]:
+    settings = settings or get_settings()
+    max_queries = max(int(settings.discovery_max_search_queries_per_cycle or 0), 0)
+    structured_plans = planner_plan.get("structured_query_plans") or {}
+    ats_queries = [
+        str(entry.get("query_text") or "").strip()
+        for entry in structured_plans.get("ats", [])
+        if entry.get("executable")
+    ]
+    bounded_ats_limit = 0
+    if max_queries > 0:
+        bounded_ats_limit = min(len(_dedupe_strings(ats_queries)), max(1, min(4, max_queries // 2 or 1)))
+    selected_ats_queries = _bounded_worker_queries(ats_queries, bounded_ats_limit)
+    selected_search_queries = _bounded_worker_queries(
+        [query for query in list(planner_plan.get("queries") or []) if query not in set(selected_ats_queries)],
+        max(max_queries - len(selected_ats_queries), 0),
+    )
+    return {
+        "ats_queries": selected_ats_queries,
+        "search_queries": selected_search_queries,
+    }
+
+
+def _execute_search_worker(
+    worker_name: str,
+    query_texts: list[str],
+    fetcher: Callable[[list[str]], tuple[list[SearchDiscoveryResult], bool]],
+    diagnostics_provider: Callable[[], dict[str, object]] | None = None,
+) -> AcquisitionWorkerExecution:
+    if not query_texts:
+        return AcquisitionWorkerExecution(
+            worker_name=worker_name,
+            query_texts=[],
+            results=[],
+            live=False,
+            diagnostics={"status": "not_run", "reason": "no_queries"},
+        )
+    results, live = fetcher(query_texts)
+    diagnostics = dict(diagnostics_provider() if diagnostics_provider else {})
+    diagnostics.setdefault("status", "results" if results else "empty")
+    diagnostics.setdefault("query_count", len(query_texts))
+    diagnostics.setdefault("result_count", len(results))
+    return AcquisitionWorkerExecution(
+        worker_name=worker_name,
+        query_texts=query_texts,
+        results=results,
+        live=live,
+        diagnostics=diagnostics,
+    )
+
+
+def ats_resolver_worker(
+    planner_plan: dict,
+    *,
+    connector: SearchDiscoveryConnector | None = None,
+    settings: Settings | None = None,
+    require_live: bool = False,
+    fetcher: Callable[[list[str]], tuple[list[SearchDiscoveryResult], bool]] | None = None,
+) -> AcquisitionWorkerExecution:
+    settings = settings or get_settings()
+    connector = connector or SearchDiscoveryConnector()
+    acquisition_plan = build_acquisition_plan(planner_plan, settings=settings)
+    return _execute_search_worker(
+        "ats_resolver",
+        acquisition_plan["ats_queries"],
+        fetcher or (lambda query_texts: connector.fetch(query_texts, require_live)),
+        lambda: dict(getattr(connector, "last_fetch_diagnostics", {}) or {}),
+    )
+
+
+def search_acquisition_worker(
+    planner_plan: dict,
+    *,
+    connector: SearchDiscoveryConnector | None = None,
+    settings: Settings | None = None,
+    require_live: bool = False,
+    fetcher: Callable[[list[str]], tuple[list[SearchDiscoveryResult], bool]] | None = None,
+) -> AcquisitionWorkerExecution:
+    settings = settings or get_settings()
+    connector = connector or SearchDiscoveryConnector()
+    acquisition_plan = build_acquisition_plan(planner_plan, settings=settings)
+    return _execute_search_worker(
+        "search",
+        acquisition_plan["search_queries"],
+        fetcher or (lambda query_texts: connector.fetch(query_texts, require_live)),
+        lambda: dict(getattr(connector, "last_fetch_diagnostics", {}) or {}),
+    )
+
+
 def extractor_agent(
     results: list[SearchDiscoveryResult],
     settings: Settings | None = None,
@@ -331,6 +456,33 @@ def extractor_agent(
             },
         )
     return extractions, derived_results
+
+
+def parser_acquisition_worker(
+    results: list[SearchDiscoveryResult],
+    settings: Settings | None = None,
+    extractor: Callable[[list[SearchDiscoveryResult], Settings | None], tuple[list[ATSExtractionResult], list[SearchDiscoveryResult]]] | None = None,
+) -> AcquisitionWorkerExecution:
+    settings = settings or get_settings()
+    extractor_fn = extractor or extractor_agent
+    extractions, derived_results = extractor_fn(results, settings=settings)
+    diagnostics = {
+        "status": "results" if extractions or derived_results else "empty",
+        "input_result_count": len(results),
+        "pages_crawled": len(extractions),
+        "derived_result_count": len(derived_results),
+        "greenhouse_tokens": sorted({token for extraction in extractions for token in extraction.greenhouse_tokens})[:12],
+        "ashby_identifiers": sorted({org for extraction in extractions for org in extraction.ashby_identifiers})[:12],
+    }
+    return AcquisitionWorkerExecution(
+        worker_name="parser",
+        query_texts=[],
+        results=results,
+        live=False,
+        diagnostics=diagnostics,
+        extractions=extractions,
+        derived_results=derived_results,
+    )
 
 
 def classify_search_surface(result: SearchDiscoveryResult) -> str:

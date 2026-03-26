@@ -20,6 +20,8 @@ from connectors.search_web import (
     extract_direct_listing_from_html,
     extract_ats_identifiers_from_html,
 )
+from core.config import Settings
+from services.discovery_agents import ats_resolver_worker, parser_acquisition_worker, search_acquisition_worker
 
 
 def test_extract_ats_identifiers_from_careers_page_html() -> None:
@@ -325,6 +327,95 @@ def test_build_search_queries_prefers_careers_mix_over_ats_direct_only() -> None
     assert any('"Acme" "chief of staff" careers' in query for query in queries)
     ats_direct_count = sum(1 for query in queries if query.startswith("site:job-boards.greenhouse.io") or query.startswith("site:jobs.ashbyhq.com"))
     assert ats_direct_count < len(queries)
+
+
+def test_acquisition_workers_split_ats_and_search_execution_with_candidate_urls() -> None:
+    planner_plan = {
+        "queries": ['"chief of staff" startup careers', '"business operations lead" startup careers'],
+        "structured_query_plans": {
+            "ats": [
+                {"query_text": 'site:job-boards.greenhouse.io "chief of staff"', "executable": True},
+                {"query_text": 'site:jobs.ashbyhq.com "chief of staff"', "executable": True},
+            ],
+            "search": [],
+            "weak_signal": [],
+        },
+    }
+
+    def fake_fetch(query_texts: list[str]) -> tuple[list[SearchDiscoveryResult], bool]:
+        if query_texts and query_texts[0].startswith("site:"):
+            return (
+                [
+                    SearchDiscoveryResult(
+                        query_text=query_texts[0],
+                        title="Chief of Staff - Example",
+                        url="https://job-boards.greenhouse.io/example/jobs/123",
+                    )
+                ],
+                True,
+            )
+        return (
+            [
+                SearchDiscoveryResult(
+                    query_text=query_texts[0],
+                    title="Example Careers",
+                    url="https://careers.example.com/jobs",
+                )
+            ],
+            True,
+        )
+
+    ats_execution = ats_resolver_worker(
+        planner_plan,
+        settings=Settings(discovery_max_search_queries_per_cycle=4),
+        fetcher=fake_fetch,
+    )
+    search_execution = search_acquisition_worker(
+        planner_plan,
+        settings=Settings(discovery_max_search_queries_per_cycle=4),
+        fetcher=fake_fetch,
+    )
+
+    assert ats_execution.worker_name == "ats_resolver"
+    assert ats_execution.results[0].url == "https://job-boards.greenhouse.io/example/jobs/123"
+    assert ats_execution.summary()["candidate_urls"] == ["https://job-boards.greenhouse.io/example/jobs/123"]
+    assert search_execution.worker_name == "search"
+    assert search_execution.results[0].url == "https://careers.example.com/jobs"
+    assert search_execution.summary()["candidate_urls"] == ["https://careers.example.com/jobs"]
+
+
+def test_parser_acquisition_worker_extracts_job_links_from_careers_page(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "services.discovery_agents.fetch_page_snapshot",
+        lambda _url: (
+            "https://example.com/careers",
+            """
+            <html>
+              <head><title>Example Careers</title></head>
+              <body>
+                <a href="https://job-boards.greenhouse.io/example/jobs/123">Open roles</a>
+              </body>
+            </html>
+            """,
+        ),
+    )
+    monkeypatch.setattr("services.discovery_agents.interpret_discovery_page_with_ai", lambda _context: None)
+
+    execution = parser_acquisition_worker(
+        [
+            SearchDiscoveryResult(
+                query_text='"chief of staff" startup careers',
+                title="Example Careers",
+                url="https://example.com/careers",
+            )
+        ],
+        settings=Settings(discovery_max_pages_to_crawl_per_cycle=2),
+    )
+
+    assert execution.worker_name == "parser"
+    assert execution.diagnostics["pages_crawled"] == 1
+    assert execution.derived_results is not None
+    assert execution.derived_results[0].url == "https://job-boards.greenhouse.io/example/jobs"
 
 
 def test_classify_query_family_captures_existing_query_mix() -> None:

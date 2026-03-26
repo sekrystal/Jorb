@@ -20,7 +20,7 @@ from services.company_discovery import (
     triage_candidate,
     upsert_discovered_company,
 )
-from services.discovery_agents import planner_agent
+from services.discovery_agents import build_acquisition_plan, planner_agent
 
 
 def _session():
@@ -175,6 +175,20 @@ def test_planner_agent_structured_plans_include_role_location_combinations_witho
     assert any(entry["role"] == "chief of staff" and entry["location"] == "san francisco" for entry in ats_entries)
     assert any(entry["role"] == "business operations lead" and entry["location"] == "new york" for entry in weak_signal_entries)
     assert all("url" not in entry and "board_locator" not in entry for entries in plan["structured_query_plans"].values() for entry in entries)
+
+
+def test_build_acquisition_plan_reserves_bounded_budget_for_ats_queries() -> None:
+    session = _session()
+    profile = _profile(session)
+    settings = Settings(discovery_max_search_queries_per_cycle=6)
+
+    plan = planner_agent(session, profile, settings=settings)
+    acquisition_plan = build_acquisition_plan(plan, settings=settings)
+
+    assert len(acquisition_plan["ats_queries"]) == 3
+    assert len(acquisition_plan["search_queries"]) == 3
+    assert all(query.startswith("site:job-boards.greenhouse.io") or query.startswith("site:jobs.ashbyhq.com") for query in acquisition_plan["ats_queries"])
+    assert all(query in plan["queries"] or "site:" in query for query in acquisition_plan["search_queries"])
 
 
 def test_record_expansion_attempt_updates_yield_and_status() -> None:

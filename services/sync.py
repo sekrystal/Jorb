@@ -44,7 +44,15 @@ from services.company_discovery import (
     upsert_discovered_company,
 )
 from services.connectors_health import run_connector_fetch
-from services.discovery_agents import extractor_agent, learning_agent, planner_agent, triage_agent
+from services.discovery_agents import (
+    ats_resolver_worker,
+    extractor_agent,
+    learning_agent,
+    parser_acquisition_worker,
+    planner_agent,
+    search_acquisition_worker,
+    triage_agent,
+)
 from services.explain import build_explanation
 from services.extract_signal import extract_many
 from services.freshness import classify_freshness_label, has_expired_pattern, validate_listing
@@ -896,19 +904,44 @@ def sync_all(
     new_discovery_count = 0
 
     if settings.search_discovery_enabled and search_queries:
-        search_results, search_live, _ = run_connector_fetch(
-            session,
-            "search_web",
-            partial(search_connector.fetch, search_queries, "search_web" in strict_live_connectors),
-            date_fields=[],
+        ats_execution = ats_resolver_worker(
+            planner_plan,
+            connector=SearchDiscoveryConnector(),
+            settings=settings,
+            require_live="search_web" in strict_live_connectors,
         )
-        search_diagnostics = _search_fetch_diagnostics(search_connector, search_queries)
+        search_execution = search_acquisition_worker(
+            planner_plan,
+            connector=search_connector,
+            settings=settings,
+            require_live="search_web" in strict_live_connectors,
+            fetcher=lambda query_texts: run_connector_fetch(
+                session,
+                "search_web",
+                partial(search_connector.fetch, query_texts, "search_web" in strict_live_connectors),
+                date_fields=[],
+            )[:2],
+        )
+        search_results = search_execution.results
+        search_live = search_execution.live
+        search_diagnostics = _search_fetch_diagnostics(search_connector, search_execution.query_texts)
         cycle_metrics["search_fetch_diagnostics"] = search_diagnostics
         zero_yield_summary = _search_zero_yield_summary(search_diagnostics)
         if zero_yield_summary is not None:
             cycle_metrics["search_zero_yield"] = zero_yield_summary
             logger.warning("[DISCOVERY_SEARCH_ZERO_YIELD] %s", zero_yield_summary)
-        extractions, derived_results = extractor_agent(search_results, settings=settings)
+        if ats_execution.results:
+            deduped_seed_results: list[SearchDiscoveryResult] = []
+            seen_seed_urls: set[str] = set()
+            for result in [*ats_execution.results, *search_results]:
+                if result.url in seen_seed_urls:
+                    continue
+                seen_seed_urls.add(result.url)
+                deduped_seed_results.append(result)
+            search_results = deduped_seed_results
+        parser_execution = parser_acquisition_worker(search_results, settings=settings, extractor=extractor_agent)
+        extractions = parser_execution.extractions or []
+        derived_results = parser_execution.derived_results or []
         extraction_by_url: dict[str, object] = {}
         for extraction in extractions:
             extraction_by_url[extraction.source_url] = extraction
@@ -933,6 +966,30 @@ def sync_all(
                 "greenhouse_tokens": sorted({token for item in extractions for token in item.greenhouse_tokens})[:12],
                 "ashby_identifiers": sorted({org for item in extractions for org in item.ashby_identifiers})[:12],
             },
+        )
+        log_agent_run(
+            session,
+            "Discovery",
+            "resolved ats acquisition plan",
+            f"ATS resolver ran {len(ats_execution.query_texts)} queries and found {len(ats_execution.results)} candidate URLs.",
+            len(ats_execution.results),
+            metadata_json=ats_execution.summary(),
+        )
+        log_agent_run(
+            session,
+            "Discovery",
+            "searched discovery acquisition plan",
+            f"Search worker ran {len(search_execution.query_texts)} queries and found {len(search_execution.results)} candidate URLs.",
+            len(search_execution.results),
+            metadata_json=search_execution.summary(),
+        )
+        log_agent_run(
+            session,
+            "Discovery",
+            "parsed discovery pages",
+            f"Parser crawled {len(extractions)} pages and derived {len(derived_results)} ATS candidates.",
+            len(derived_results),
+            metadata_json=parser_execution.summary(),
         )
         if extractions:
             new_greenhouse_tokens = {
