@@ -256,6 +256,13 @@ Search discovery flags:
 - `SEARCH_DISCOVERY_QUERY_LIMIT`
 - `SEARCH_DISCOVERY_RESULT_LIMIT`
 
+Truthful runtime source matrix:
+
+- `/discovery-status` now exposes an explicit source matrix for `greenhouse`, `ashby`, `search_web`, bounded search scraping fallback, `x_search`, and `user_submitted`
+- each source is classified as `working`, `partially_working`, or `not_working`
+- unsupported or disabled sources are reported explicitly instead of reading like ordinary zero-yield discovery
+- `search_web` and search-driven scraping remain recall-expansion layers only; trusted listings still come from normalized ATS fetches or user-supplied links
+
 What is tested today:
 
 - query generation

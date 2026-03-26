@@ -25,6 +25,7 @@ from core.schemas import ListingRecord, LeadResponse, SignalRecord, StatsRespons
 from services.activity import append_lead_agent_trace, log_agent_activity, log_agent_run
 from services.ai_judges import judge_critic_with_ai, judge_fit_with_ai
 from services.company_discovery import (
+    build_discovery_source_matrix,
     build_query_inputs,
     candidate_from_search_result,
     classify_surface_provenance,
@@ -1753,6 +1754,24 @@ def sync_all(
     )
     session.flush()
     surfaced_count = session.scalar(select(func.count(Lead.id)).where(Lead.hidden.is_(False))) or 0
+    source_matrix = [row.model_dump() for row in build_discovery_source_matrix(
+        session,
+        settings=settings,
+        enabled_connectors=enabled_connectors,
+        strict_live_connectors=strict_live_connectors,
+    )]
+    unavailable_automatic_sources = [
+        row["label"]
+        for row in source_matrix
+        if row["source_key"] in {"greenhouse", "ashby", "search_web", "search_web_scrape_fallback", "x_search"}
+        and row["classification"] == "not_working"
+    ]
+    runnable_automatic_sources = [
+        row["label"]
+        for row in source_matrix
+        if row["source_key"] in {"greenhouse", "ashby", "search_web", "search_web_scrape_fallback", "x_search"}
+        and row["classification"] in {"working", "partially_working"}
+    ]
     discovery_summary = None
     if (
         discovery_metrics.get("greenhouse", {}).get("verified", 0) == 0
@@ -1763,7 +1782,18 @@ def sync_all(
         discovery_summary = "Jobs were discovered but all were filtered out before surfacing."
         logger.error("[DISCOVERY_FAILURE] No high-signal jobs. Only weak signals found and filtered out.")
     elif all(item.get("raw", 0) == 0 for item in discovery_metrics.values()):
-        discovery_summary = "No jobs found from any connector."
+        if not runnable_automatic_sources:
+            discovery_summary = (
+                "No jobs found from any connector. "
+                f"Automatic discovery is not runnable: {', '.join(unavailable_automatic_sources)}."
+            )
+        elif unavailable_automatic_sources:
+            discovery_summary = (
+                "No jobs found from any connector. "
+                f"Unavailable sources this cycle: {', '.join(unavailable_automatic_sources)}."
+            )
+        else:
+            discovery_summary = "No jobs found from any connector."
         logger.error("[DISCOVERY_FAILURE] No jobs found from any source.")
     elif surfaced_count > 0:
         discovery_summary = "Jobs found and surfaced normally."
@@ -1775,6 +1805,8 @@ def sync_all(
         "next_recommended_queries": learning_update.get("next_queries", []),
         "focus_companies": learning_update.get("focus_companies", []),
         "cycle_metrics": dict(cycle_metrics),
+        "source_matrix": source_matrix,
+        "unavailable_sources": unavailable_automatic_sources,
     }
     return SyncResult(
         signals_ingested=signals_ingested,

@@ -12,8 +12,10 @@ from sqlalchemy.orm import Session
 
 from connectors.search_web import SearchDiscoveryResult
 from core.config import Settings, get_settings
-from core.models import AgentRun, Application, CompanyDiscovery, Lead
-from core.schemas import CompanyDiscoveryRowResponse, DiscoveryStatusResponse
+from core.models import AgentRun, Application, CompanyDiscovery, ConnectorHealth, Lead
+from core.schemas import CompanyDiscoveryRowResponse, DiscoverySourceMatrixRow, DiscoveryStatusResponse
+from services.connector_admin import connector_blocked_reason
+from services.ops import get_runtime_connector_set
 
 
 def classify_surface_provenance(
@@ -505,10 +507,336 @@ def _latest_agent_run(
     return _serialize_agent_run(row)
 
 
+def build_discovery_source_matrix(
+    session: Session,
+    *,
+    settings: Settings | None = None,
+    enabled_connectors: set[str] | None = None,
+    strict_live_connectors: set[str] | None = None,
+) -> list[DiscoverySourceMatrixRow]:
+    settings = settings or get_settings()
+    _, runtime_enabled_connectors, strict_runtime_connectors = get_runtime_connector_set(settings)
+    enabled_connectors = runtime_enabled_connectors if enabled_connectors is None else set(enabled_connectors)
+    strict_live_connectors = strict_runtime_connectors if strict_live_connectors is None else set(strict_live_connectors)
+    health_rows = {
+        row.connector_name: row
+        for row in session.scalars(select(ConnectorHealth)).all()
+    }
+
+    def _connector_payload(
+        *,
+        source_key: str,
+        label: str,
+        classification: str,
+        runtime_state: str,
+        toggle_key: str,
+        toggle_enabled: bool,
+        runtime_enabled: bool,
+        strict_live_enabled: bool,
+        live_ready: bool,
+        trusted_for_output: bool,
+        reason: str,
+    ) -> DiscoverySourceMatrixRow:
+        health_row = health_rows.get(source_key)
+        blocked_reason = None
+        if runtime_state != "demo_enabled":
+            blocked_reason = (
+                connector_blocked_reason(source_key, health_row, settings=settings)
+                if source_key in health_rows or source_key in {"greenhouse", "ashby", "search_web", "x_search"}
+                else None
+            )
+        return DiscoverySourceMatrixRow(
+            source_key=source_key,
+            label=label,
+            classification=classification,
+            runtime_state=runtime_state,
+            toggle_key=toggle_key,
+            toggle_enabled=toggle_enabled,
+            runtime_enabled=runtime_enabled,
+            strict_live_enabled=strict_live_enabled,
+            live_ready=live_ready,
+            trusted_for_output=trusted_for_output,
+            reason=reason,
+            blocked_reason=blocked_reason,
+            connector_status=health_row.status if health_row else None,
+            last_mode=health_row.last_mode if health_row else None,
+            last_error=health_row.last_error if health_row else None,
+        )
+
+    rows: list[DiscoverySourceMatrixRow] = []
+
+    greenhouse_live_ready = settings.greenhouse_enabled and bool(settings.greenhouse_tokens)
+    greenhouse_runtime_enabled = "greenhouse" in enabled_connectors
+    if settings.demo_mode and greenhouse_runtime_enabled:
+        rows.append(
+            _connector_payload(
+                source_key="greenhouse",
+                label="Greenhouse",
+                classification="working",
+                runtime_state="demo_enabled",
+                toggle_key="GREENHOUSE_ENABLED + GREENHOUSE_BOARD_TOKENS",
+                toggle_enabled=settings.greenhouse_enabled,
+                runtime_enabled=greenhouse_runtime_enabled,
+                strict_live_enabled="greenhouse" in strict_live_connectors,
+                live_ready=greenhouse_live_ready,
+                trusted_for_output=True,
+                reason="Structured ATS polling works in demo mode here and becomes live-trustworthy when Greenhouse is enabled with board tokens.",
+            )
+        )
+    elif greenhouse_live_ready and greenhouse_runtime_enabled:
+        rows.append(
+            _connector_payload(
+                source_key="greenhouse",
+                label="Greenhouse",
+                classification="working",
+                runtime_state="live_enabled",
+                toggle_key="GREENHOUSE_ENABLED + GREENHOUSE_BOARD_TOKENS",
+                toggle_enabled=True,
+                runtime_enabled=True,
+                strict_live_enabled="greenhouse" in strict_live_connectors,
+                live_ready=True,
+                trusted_for_output=True,
+                reason="Configured Greenhouse boards are polled directly and remain the trusted ATS source of truth.",
+            )
+        )
+    elif settings.greenhouse_enabled and not settings.greenhouse_tokens:
+        rows.append(
+            _connector_payload(
+                source_key="greenhouse",
+                label="Greenhouse",
+                classification="not_working",
+                runtime_state="misconfigured",
+                toggle_key="GREENHOUSE_ENABLED + GREENHOUSE_BOARD_TOKENS",
+                toggle_enabled=True,
+                runtime_enabled=False,
+                strict_live_enabled=False,
+                live_ready=False,
+                trusted_for_output=False,
+                reason="Greenhouse is enabled but no board tokens are configured, so no live polling can run.",
+            )
+        )
+    else:
+        rows.append(
+            _connector_payload(
+                source_key="greenhouse",
+                label="Greenhouse",
+                classification="not_working",
+                runtime_state="disabled",
+                toggle_key="GREENHOUSE_ENABLED + GREENHOUSE_BOARD_TOKENS",
+                toggle_enabled=False,
+                runtime_enabled=False,
+                strict_live_enabled=False,
+                live_ready=False,
+                trusted_for_output=False,
+                reason="Greenhouse discovery is disabled until the kill switch is on and board tokens are configured.",
+            )
+        )
+
+    ashby_runtime_enabled = "ashby" in enabled_connectors
+    ashby_live_ready = bool(settings.ashby_orgs)
+    if settings.demo_mode and ashby_runtime_enabled:
+        rows.append(
+            _connector_payload(
+                source_key="ashby",
+                label="Ashby",
+                classification="working",
+                runtime_state="demo_enabled",
+                toggle_key="ASHBY_ORG_KEYS",
+                toggle_enabled=bool(settings.ashby_orgs),
+                runtime_enabled=True,
+                strict_live_enabled="ashby" in strict_live_connectors,
+                live_ready=ashby_live_ready,
+                trusted_for_output=True,
+                reason="Ashby expansion works in demo mode and can run live when org keys are configured.",
+            )
+        )
+    elif ashby_live_ready and ashby_runtime_enabled:
+        rows.append(
+            _connector_payload(
+                source_key="ashby",
+                label="Ashby",
+                classification="working",
+                runtime_state="live_enabled",
+                toggle_key="ASHBY_ORG_KEYS",
+                toggle_enabled=True,
+                runtime_enabled=True,
+                strict_live_enabled="ashby" in strict_live_connectors,
+                live_ready=True,
+                trusted_for_output=True,
+                reason="Configured Ashby org keys are polled directly and their normalized jobs can surface as trusted listings.",
+            )
+        )
+    elif settings.search_discovery_enabled and ashby_runtime_enabled:
+        rows.append(
+            _connector_payload(
+                source_key="ashby",
+                label="Ashby",
+                classification="partially_working",
+                runtime_state="discovery_bridge_only",
+                toggle_key="ASHBY_ORG_KEYS",
+                toggle_enabled=False,
+                runtime_enabled=True,
+                strict_live_enabled="ashby" in strict_live_connectors,
+                live_ready=False,
+                trusted_for_output=True,
+                reason="Ashby is only expanded from search-discovered identifiers right now, so coverage is opportunistic rather than guaranteed.",
+            )
+        )
+    else:
+        rows.append(
+            _connector_payload(
+                source_key="ashby",
+                label="Ashby",
+                classification="not_working",
+                runtime_state="disabled",
+                toggle_key="ASHBY_ORG_KEYS",
+                toggle_enabled=False,
+                runtime_enabled=False,
+                strict_live_enabled=False,
+                live_ready=False,
+                trusted_for_output=False,
+                reason="Ashby direct polling is inactive until org keys are configured or search discovery is allowed to bridge identifiers.",
+            )
+        )
+
+    search_runtime_enabled = "search_web" in enabled_connectors
+    if settings.search_discovery_enabled and search_runtime_enabled:
+        rows.append(
+            _connector_payload(
+                source_key="search_web",
+                label="Search Web",
+                classification="partially_working",
+                runtime_state="live_enabled",
+                toggle_key="SEARCH_DISCOVERY_ENABLED",
+                toggle_enabled=True,
+                runtime_enabled=True,
+                strict_live_enabled="search_web" in strict_live_connectors,
+                live_ready=True,
+                trusted_for_output=False,
+                reason=f"Web search runs through {settings.search_discovery_provider} as bounded recall expansion only and does not directly establish trusted listing truth.",
+            )
+        )
+        rows.append(
+            DiscoverySourceMatrixRow(
+                source_key="search_web_scrape_fallback",
+                label="Search Scrape Fallback",
+                classification="partially_working",
+                runtime_state="bounded_follow_on",
+                toggle_key="SEARCH_DISCOVERY_ENABLED",
+                toggle_enabled=True,
+                runtime_enabled=True,
+                strict_live_enabled=False,
+                live_ready=True,
+                trusted_for_output=False,
+                reason="Careers-page scraping is bounded and only extracts ATS identifiers or careers surfaces; it does not directly trust scraped jobs.",
+            )
+        )
+    else:
+        rows.append(
+            _connector_payload(
+                source_key="search_web",
+                label="Search Web",
+                classification="not_working",
+                runtime_state="disabled",
+                toggle_key="SEARCH_DISCOVERY_ENABLED",
+                toggle_enabled=False,
+                runtime_enabled=False,
+                strict_live_enabled=False,
+                live_ready=False,
+                trusted_for_output=False,
+                reason="Search-driven discovery is disabled, so no web recall expansion or ATS identifier discovery will run.",
+            )
+        )
+        rows.append(
+            DiscoverySourceMatrixRow(
+                source_key="search_web_scrape_fallback",
+                label="Search Scrape Fallback",
+                classification="not_working",
+                runtime_state="disabled",
+                toggle_key="SEARCH_DISCOVERY_ENABLED",
+                toggle_enabled=False,
+                runtime_enabled=False,
+                strict_live_enabled=False,
+                live_ready=False,
+                trusted_for_output=False,
+                reason="Careers-page scraping is only active behind search discovery and is fully off when search discovery is disabled.",
+            )
+        )
+
+    x_runtime_enabled = "x_search" in enabled_connectors
+    x_live_ready = bool(settings.x_bearer_token)
+    if settings.demo_mode and x_runtime_enabled:
+        rows.append(
+            _connector_payload(
+                source_key="x_search",
+                label="X Search",
+                classification="partially_working",
+                runtime_state="demo_enabled",
+                toggle_key="X_BEARER_TOKEN",
+                toggle_enabled=x_live_ready,
+                runtime_enabled=True,
+                strict_live_enabled="x_search" in strict_live_connectors,
+                live_ready=x_live_ready,
+                trusted_for_output=False,
+                reason="X search only provides weak hiring signals here; demo mode uses seeded signals and does not prove live coverage.",
+            )
+        )
+    elif x_live_ready and x_runtime_enabled:
+        rows.append(
+            _connector_payload(
+                source_key="x_search",
+                label="X Search",
+                classification="partially_working",
+                runtime_state="live_enabled",
+                toggle_key="X_BEARER_TOKEN",
+                toggle_enabled=True,
+                runtime_enabled=True,
+                strict_live_enabled="x_search" in strict_live_connectors,
+                live_ready=True,
+                trusted_for_output=False,
+                reason="X search can fetch live hiring signals, but those signals are weak evidence and are not a trusted listing source on their own.",
+            )
+        )
+    else:
+        rows.append(
+            _connector_payload(
+                source_key="x_search",
+                label="X Search",
+                classification="not_working",
+                runtime_state="disabled",
+                toggle_key="X_BEARER_TOKEN",
+                toggle_enabled=False,
+                runtime_enabled=False,
+                strict_live_enabled=False,
+                live_ready=False,
+                trusted_for_output=False,
+                reason="X search is off until a bearer token is configured; without it, the product should not imply live X coverage.",
+            )
+        )
+
+    rows.append(
+        DiscoverySourceMatrixRow(
+            source_key="user_submitted",
+            label="User-Supplied Links",
+            classification="working",
+            runtime_state="manual_ingest",
+            toggle_key="manual",
+            toggle_enabled=True,
+            runtime_enabled=True,
+            strict_live_enabled=False,
+            live_ready=True,
+            trusted_for_output=True,
+            reason="User-supplied links ingest directly into the same listing and lead validation flow, so this path is explicit and trustworthy.",
+        )
+    )
+    return rows
+
+
 def build_discovery_status(session: Session) -> DiscoveryStatusResponse:
     from services.discovery_agents import recent_discovery_agent_runs, summarize_expansion_actions
 
     since = datetime.utcnow() - timedelta(hours=24)
+    source_matrix = build_discovery_source_matrix(session)
     recent_runs = recent_discovery_agent_runs(session)
     rows = session.scalars(
         select(CompanyDiscovery)
@@ -575,6 +903,7 @@ def build_discovery_status(session: Session) -> DiscoveryStatusResponse:
         total_known_companies=session.scalar(select(func.count(CompanyDiscovery.id))) or 0,
         discovered_last_24h=session.scalar(select(func.count(CompanyDiscovery.id)).where(CompanyDiscovery.last_discovered_at >= since)) or 0,
         expanded_last_24h=session.scalar(select(func.count(CompanyDiscovery.id)).where(CompanyDiscovery.last_expanded_at >= since)) or 0,
+        source_matrix=source_matrix,
         latest_planner_run=planner_run,
         recent_plans=recent_runs,
         recent_expansions=summarize_expansion_actions(expansion_rows),

@@ -256,6 +256,43 @@ def test_recommendation_action_summary_uses_action_label_and_explanation() -> No
     assert summary == "Seek referral: Seek referral because the source signal is still weak."
 
 
+def test_discovery_source_matrix_frame_exposes_truth_columns() -> None:
+    frame = ui_app.discovery_source_matrix_frame(
+        [
+            {
+                "source_key": "greenhouse",
+                "label": "Greenhouse",
+                "classification": "working",
+                "runtime_state": "live_enabled",
+                "toggle_key": "GREENHOUSE_ENABLED + GREENHOUSE_BOARD_TOKENS",
+                "runtime_enabled": True,
+                "strict_live_enabled": True,
+                "trusted_for_output": True,
+                "blocked_reason": None,
+                "reason": "Configured boards are polled directly.",
+            },
+            {
+                "source_key": "search_web",
+                "label": "Search Web",
+                "classification": "partially_working",
+                "runtime_state": "live_enabled",
+                "toggle_key": "SEARCH_DISCOVERY_ENABLED",
+                "runtime_enabled": True,
+                "strict_live_enabled": True,
+                "trusted_for_output": False,
+                "blocked_reason": "cooldown",
+                "reason": "Search is recall expansion only.",
+            },
+        ]
+    )
+
+    assert frame["source"].tolist() == ["Greenhouse", "Search Web"]
+    assert frame["classification"].tolist() == ["working", "partially working"]
+    assert frame["runtime_enabled"].tolist() == ["yes", "yes"]
+    assert frame["trusted_for_output"].tolist() == ["yes", "no"]
+    assert frame["blocked_reason"].tolist() == ["", "cooldown"]
+
+
 def test_recommendation_table_explanation_prefers_structured_score_headline() -> None:
     summary = ui_app.recommendation_table_explanation(
         {

@@ -780,10 +780,29 @@ class CompanyDiscoveryRowResponse(BaseModel):
     metadata_json: dict[str, Any] = Field(default_factory=dict)
 
 
+class DiscoverySourceMatrixRow(BaseModel):
+    source_key: str
+    label: str
+    classification: Literal["working", "partially_working", "not_working"]
+    runtime_state: str
+    toggle_key: str
+    toggle_enabled: bool = False
+    runtime_enabled: bool = False
+    strict_live_enabled: bool = False
+    live_ready: bool = False
+    trusted_for_output: bool = False
+    reason: str
+    blocked_reason: Optional[str] = None
+    connector_status: Optional[str] = None
+    last_mode: Optional[str] = None
+    last_error: Optional[str] = None
+
+
 class DiscoveryStatusResponse(BaseModel):
     total_known_companies: int = 0
     discovered_last_24h: int = 0
     expanded_last_24h: int = 0
+    source_matrix: list[DiscoverySourceMatrixRow] = Field(default_factory=list)
     recent_items: list[CompanyDiscoveryRowResponse] = Field(default_factory=list)
     latest_planner_run: Optional[dict[str, Any]] = None
     recent_plans: list[dict[str, Any]] = Field(default_factory=list)

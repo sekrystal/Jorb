@@ -9,6 +9,7 @@ from connectors.search_web import SearchDiscoveryResult
 from core.config import Settings
 from core.models import AgentRun, Base, CandidateProfile
 from services.company_discovery import (
+    build_discovery_source_matrix,
     build_discovery_status,
     candidate_from_search_result,
     classify_surface_provenance,
@@ -251,6 +252,7 @@ def test_discovery_status_returns_recent_items() -> None:
 
     status = build_discovery_status(session)
     assert status.total_known_companies == 3
+    assert status.source_matrix
     assert {item.company_name for item in status.recent_items} == {row.company_name, blocked_row.company_name, ashby_row.company_name}
     assert status.latest_planner_run is not None
     assert status.latest_planner_run["agent_name"] == "Planner"
@@ -268,6 +270,62 @@ def test_discovery_status_returns_recent_items() -> None:
     recent_example = next(item for item in status.recent_items if item.company_name == row.company_name)
     assert recent_example.metadata_json["discovery_lineage"]["surface"]["source_lineage"] == "greenhouse"
     assert recent_example.metadata_json["discovery_lineage"]["planner"]["query_family"] == "unknown"
+
+
+def test_discovery_source_matrix_classifies_live_truth_explicitly() -> None:
+    session = _session()
+    settings = Settings(
+        demo_mode=False,
+        greenhouse_enabled=True,
+        greenhouse_board_tokens="cursor",
+        ashby_org_keys="mercor",
+        search_discovery_enabled=True,
+        x_bearer_token=None,
+    )
+
+    matrix = build_discovery_source_matrix(
+        session,
+        settings=settings,
+        enabled_connectors={"greenhouse", "ashby", "search_web"},
+        strict_live_connectors={"greenhouse", "ashby", "search_web"},
+    )
+    by_key = {item.source_key: item for item in matrix}
+
+    assert by_key["greenhouse"].classification == "working"
+    assert by_key["greenhouse"].trusted_for_output is True
+    assert by_key["ashby"].classification == "working"
+    assert by_key["search_web"].classification == "partially_working"
+    assert by_key["search_web"].trusted_for_output is False
+    assert by_key["search_web_scrape_fallback"].classification == "partially_working"
+    assert by_key["x_search"].classification == "not_working"
+    assert by_key["user_submitted"].classification == "working"
+
+
+def test_discovery_source_matrix_marks_disabled_sources_explicitly() -> None:
+    session = _session()
+    settings = Settings(
+        demo_mode=False,
+        greenhouse_enabled=False,
+        greenhouse_board_tokens="",
+        ashby_org_keys="",
+        search_discovery_enabled=False,
+        x_bearer_token=None,
+    )
+
+    matrix = build_discovery_source_matrix(
+        session,
+        settings=settings,
+        enabled_connectors=set(),
+        strict_live_connectors=set(),
+    )
+    by_key = {item.source_key: item for item in matrix}
+
+    assert by_key["greenhouse"].classification == "not_working"
+    assert by_key["ashby"].classification == "not_working"
+    assert by_key["search_web"].classification == "not_working"
+    assert by_key["search_web_scrape_fallback"].classification == "not_working"
+    assert by_key["x_search"].classification == "not_working"
+    assert by_key["user_submitted"].classification == "working"
 
 
 def test_discovery_status_uses_latest_relevant_runs_beyond_recent_window() -> None:

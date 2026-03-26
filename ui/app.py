@@ -331,6 +331,25 @@ def discovery_query_family_frame(cycle_metrics: dict[str, Any]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def discovery_source_matrix_frame(source_matrix: list[dict[str, Any]]) -> pd.DataFrame:
+    rows: list[dict[str, Any]] = []
+    for item in source_matrix:
+        rows.append(
+            {
+                "source": item.get("label") or item.get("source_key"),
+                "classification": (item.get("classification") or "").replace("_", " "),
+                "runtime_state": (item.get("runtime_state") or "").replace("_", " "),
+                "toggle": item.get("toggle_key") or "",
+                "runtime_enabled": "yes" if item.get("runtime_enabled") else "no",
+                "strict_live": "yes" if item.get("strict_live_enabled") else "no",
+                "trusted_for_output": "yes" if item.get("trusted_for_output") else "no",
+                "blocked_reason": item.get("blocked_reason") or "",
+                "reason": item.get("reason") or "",
+            }
+        )
+    return pd.DataFrame(rows)
+
+
 def format_timestamp(value: Optional[str]) -> str:
     if not value:
         return ""
@@ -1321,6 +1340,12 @@ def render_discovery_tab() -> None:
     top[1].metric("Discovered 24h", payload.get("discovered_last_24h", 0))
     top[2].metric("Expanded 24h", payload.get("expanded_last_24h", 0))
     top[3].metric("Agentic visible leads", len(payload.get("recent_agentic_leads", [])))
+
+    source_matrix = payload.get("source_matrix") or []
+    if source_matrix:
+        st.markdown("#### Discovery Source Matrix")
+        source_matrix_df = discovery_source_matrix_frame(source_matrix)
+        st.dataframe(source_matrix_df, use_container_width=True, hide_index=True)
 
     cycle_metrics = payload.get("cycle_metrics") or {}
     if cycle_metrics:
