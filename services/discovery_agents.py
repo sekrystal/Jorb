@@ -25,6 +25,7 @@ from services.ai_judges import (
     plan_search_with_ai,
 )
 from services.company_discovery import CompanyDiscoveryCandidate, build_query_inputs, triage_candidate
+from services.profile import profile_search_constraints
 
 
 logger = get_logger(__name__)
@@ -33,6 +34,52 @@ ROLE_SYNONYMS = {
     "operations": ["bizops", "business operations", "strategic operations", "program operations"],
     "go_to_market": ["deployment", "implementation", "solutions", "customer success"],
 }
+
+
+def _top_geographies(preferred_locations: list[str]) -> list[str]:
+    return [
+        location
+        for location in preferred_locations
+        if "remote" not in location.lower() and "hybrid" not in location.lower() and "onsite" not in location.lower()
+    ][:2]
+
+
+def _apply_profile_search_constraints(base_queries: list[str], constraints: dict[str, object]) -> list[str]:
+    queries: list[str] = []
+    seen: set[str] = set()
+
+    def add(query: str) -> None:
+        normalized = query.strip()
+        if not normalized or normalized in seen:
+            return
+        seen.add(normalized)
+        queries.append(normalized)
+
+    target_roles = list(constraints.get("target_roles") or [])
+    preferred_locations = list(constraints.get("preferred_locations") or [])
+    work_mode_preference = str(constraints.get("work_mode_preference") or "unspecified")
+    top_geographies = _top_geographies(preferred_locations)
+
+    for role in target_roles[:3]:
+        add(f'"{role}" startup careers')
+        add(f'"{role}" startup jobs')
+        if work_mode_preference == "remote":
+            add(f'"{role}" remote us careers')
+        elif work_mode_preference in {"hybrid", "onsite"}:
+            for geography in top_geographies or preferred_locations[:1]:
+                add(f'"{role}" {work_mode_preference} "{geography}" startup careers')
+                add(f'"{role}" "{geography}" startup jobs')
+        else:
+            for geography in top_geographies:
+                add(f'"{role}" "{geography}" startup careers')
+
+    for query in base_queries:
+        lowered = query.lower()
+        if work_mode_preference in {"hybrid", "onsite"} and "remote us" in lowered:
+            continue
+        add(query)
+
+    return queries
 
 
 def _recent_successes(session: Session) -> dict[str, list[str]]:
@@ -59,6 +106,7 @@ def _recent_successes(session: Session) -> dict[str, list[str]]:
 def planner_agent(session: Session, profile: CandidateProfile, settings: Settings | None = None) -> dict:
     settings = settings or get_settings()
     query_inputs = build_query_inputs(session, profile)
+    constraints = profile_search_constraints(profile)
     learning = (profile.extracted_summary_json or {}).get("learning", {})
     successes = _recent_successes(session)
     recent_discoveries = session.scalars(
@@ -78,7 +126,7 @@ def planner_agent(session: Session, profile: CandidateProfile, settings: Setting
         if row.expansion_status in {"empty", "blocked"}
     ][:5]
     deterministic_queries = build_search_queries(
-        core_titles=profile.core_titles_json or profile.preferred_titles_json or [],
+        core_titles=constraints["target_roles"] or profile.core_titles_json or profile.preferred_titles_json or [],
         adjacent_titles=profile.adjacent_titles_json or [],
         preferred_domains=profile.preferred_domains_json or [],
         watchlist_items=[row.company_name for row in recent_discoveries[:4]],
@@ -93,7 +141,7 @@ def planner_agent(session: Session, profile: CandidateProfile, settings: Setting
             deterministic_queries.append(f'"{synonym}" remote us careers')
             deterministic_queries.append(f'"{synonym}" startup greenhouse')
             deterministic_queries.append(f'"{synonym}" startup ashby')
-    deterministic_queries = list(dict.fromkeys(deterministic_queries))
+    deterministic_queries = _apply_profile_search_constraints(list(dict.fromkeys(deterministic_queries)), constraints)
 
     ai_plan = plan_search_with_ai(
         profile_text=profile.raw_resume_text or (profile.extracted_summary_json or {}).get("summary", ""),
@@ -122,6 +170,11 @@ def planner_agent(session: Session, profile: CandidateProfile, settings: Setting
         "company_archetypes": (ai_plan or {}).get("company_archetypes", profile.preferred_domains_json or []),
         "priority_notes": (ai_plan or {}).get("priority_notes", []),
         "queries": queries,
+        "profile_constraints_applied": constraints["applied_constraints"],
+        "profile_constraints_defaulted": constraints["defaulted_constraints"],
+        "target_roles": constraints["target_roles"],
+        "preferred_locations": constraints["preferred_locations"],
+        "work_mode_preference": constraints["work_mode_preference"],
         "successful_companies": successes["successful_companies"],
         "successful_titles": successes["successful_titles"],
         "recent_failures": recent_failures,

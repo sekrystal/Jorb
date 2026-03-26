@@ -98,5 +98,99 @@ def test_strong_rank_threshold_now_requires_more_than_73() -> None:
         evidence_count=1,
         feedback_learning={},
     )
-    assert breakdown["composite"] == 5.7
+    assert breakdown["composite"] == 7.0
     assert breakdown["rank_label"] == "medium"
+
+
+def test_explicit_target_role_changes_title_fit_and_score() -> None:
+    baseline_profile = DummyProfile()
+    targeted_profile = DummyProfile()
+    targeted_profile.extracted_summary_json = {
+        "structured_profile": {
+            "targeting": {
+                "preferred_locations": ["remote"],
+                "target_roles": ["deployment strategist"],
+                "work_mode_preference": "remote",
+            }
+        }
+    }
+
+    baseline = score_lead(
+        profile=baseline_profile,
+        lead_type="listing",
+        title="Deployment Strategist",
+        company_name="Mercor",
+        company_domain="mercor.ai",
+        location="Remote - US",
+        description_text="Deployment work for an early-stage startup customer team.",
+        freshness_label="fresh",
+        listing_status="active",
+        source_type="ashby",
+        evidence_count=1,
+        feedback_learning={},
+    )
+    targeted = score_lead(
+        profile=targeted_profile,
+        lead_type="listing",
+        title="Deployment Strategist",
+        company_name="Mercor",
+        company_domain="mercor.ai",
+        location="Remote - US",
+        description_text="Deployment work for an early-stage startup customer team.",
+        freshness_label="fresh",
+        listing_status="active",
+        source_type="ashby",
+        evidence_count=1,
+        feedback_learning={},
+    )
+
+    assert targeted["title_fit_label"] == "target role match"
+    assert targeted["composite"] > baseline["composite"]
+    assert "target role" in targeted["matched_profile_fields"]
+
+
+def test_explicit_work_mode_preference_penalizes_mismatch() -> None:
+    profile = DummyProfile()
+    profile.preferred_locations_json = ["san francisco"]
+    profile.extracted_summary_json = {
+        "structured_profile": {
+            "targeting": {
+                "preferred_locations": ["san francisco"],
+                "target_roles": ["chief of staff"],
+                "work_mode_preference": "onsite",
+            }
+        }
+    }
+
+    onsite = score_lead(
+        profile=profile,
+        lead_type="listing",
+        title="Chief of Staff",
+        company_name="Acme",
+        company_domain=None,
+        location="San Francisco, CA",
+        description_text="Lead operating cadence in office with the founding team.",
+        freshness_label="fresh",
+        listing_status="active",
+        source_type="greenhouse",
+        evidence_count=1,
+        feedback_learning={},
+    )
+    remote = score_lead(
+        profile=profile,
+        lead_type="listing",
+        title="Chief of Staff",
+        company_name="Acme",
+        company_domain=None,
+        location="Remote - US",
+        description_text="Lead operating cadence in a distributed team.",
+        freshness_label="fresh",
+        listing_status="active",
+        source_type="greenhouse",
+        evidence_count=1,
+        feedback_learning={},
+    )
+
+    assert onsite["location_fit"] > remote["location_fit"]
+    assert onsite["work_mode_match"] == "onsite"
+    assert remote["work_mode_match"] == "remote"

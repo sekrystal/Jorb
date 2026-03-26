@@ -531,6 +531,8 @@ def test_build_profile_review_rows_flattens_structured_profile_for_ui() -> None:
             "preferred_titles_json": ["chief of staff"],
             "preferred_domains_json": ["ai"],
             "preferred_locations_json": ["remote"],
+            "target_roles_json": ["chief of staff"],
+            "work_mode_preference": "remote",
             "stage_preferences_json": ["series a"],
             "seniority_guess": "senior",
             "min_seniority_band": "mid",
@@ -541,6 +543,8 @@ def test_build_profile_review_rows_flattens_structured_profile_for_ui() -> None:
                     "preferred_titles": ["chief of staff"],
                     "preferred_domains": ["ai"],
                     "preferred_locations": ["remote"],
+                    "target_roles": ["chief of staff"],
+                    "work_mode_preference": "remote",
                     "stage_preferences": ["series a"],
                     "seniority": {"guess": "senior", "minimum_band": "mid", "maximum_band": "staff"},
                 },
@@ -552,6 +556,8 @@ def test_build_profile_review_rows_flattens_structured_profile_for_ui() -> None:
     by_field = {row["field"]: row["value"] for row in rows}
     assert by_field["Preferred titles"] == "chief of staff"
     assert by_field["Preferred domains"] == "ai"
+    assert by_field["Target roles"] == "chief of staff"
+    assert by_field["Work mode"] == "remote"
     assert by_field["Seniority"] == "senior (mid to staff)"
 
 
@@ -614,6 +620,7 @@ def test_apply_target_role_selection_prioritizes_selected_role_in_structured_inp
         {
             "preferred_titles_json": ["operator", "chief of staff"],
             "core_titles_json": ["operator"],
+            "target_roles_json": ["operator"],
             "extracted_summary_json": {"summary": "Operator profile"},
         },
         "founding operations lead",
@@ -621,6 +628,7 @@ def test_apply_target_role_selection_prioritizes_selected_role_in_structured_inp
 
     assert payload["preferred_titles_json"][0] == "founding operations lead"
     assert payload["core_titles_json"][0] == "founding operations lead"
+    assert payload["target_roles_json"][0] == "founding operations lead"
     assert payload["extracted_summary_json"]["selected_target_role"] == "founding operations lead"
 
 
@@ -671,6 +679,8 @@ def test_build_profile_update_payload_preserves_extracted_resume_draft_fields() 
         "raw_resume_text": "old raw text",
         "extracted_summary_json": {"summary": "old summary"},
         "seniority_guess": "mid",
+        "target_roles_json": ["operator"],
+        "work_mode_preference": "hybrid",
     }
     review_profile = {
         "profile_schema_version": "v1",
@@ -683,6 +693,8 @@ def test_build_profile_update_payload_preserves_extracted_resume_draft_fields() 
             "missing_fields": ["preferred domains"],
         },
         "seniority_guess": "senior",
+        "target_roles_json": ["chief of staff"],
+        "work_mode_preference": "remote",
     }
 
     payload = ui_app.build_profile_update_payload(
@@ -718,6 +730,8 @@ def test_build_profile_update_payload_preserves_extracted_resume_draft_fields() 
     assert payload["competencies_json"] == ["process design", "operator judgment"]
     assert payload["explicit_preferences_json"] == ["hands-on teams", "customer-facing work"]
     assert payload["seniority_guess"] == "senior"
+    assert payload["target_roles_json"] == ["chief of staff"]
+    assert payload["work_mode_preference"] == "remote"
 
 
 def test_lead_frame_prefers_source_lineage_for_provenance() -> None:

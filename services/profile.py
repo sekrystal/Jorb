@@ -27,6 +27,8 @@ KNOWN_TITLES = [
 KNOWN_LOCATIONS = ["san francisco", "new york", "remote", "bay area", "nyc"]
 KNOWN_DOMAINS = ["ai", "developer tools", "infra", "saas", "fintech", "b2b", "healthtech"]
 KNOWN_STAGES = ["seed", "series a", "series b", "early-stage", "startup", "growth"]
+KNOWN_WORK_MODES = ("remote", "hybrid", "onsite")
+DEFAULT_TARGET_ROLES = ["chief of staff", "founding operations lead"]
 SENIORITY_KEYWORDS = {
     "intern": "entry",
     "new grad": "entry",
@@ -66,6 +68,8 @@ PROFILE_INVENTORY_CATEGORY_SPECS = [
             "excluded_titles_json",
             "preferred_domains_json",
             "preferred_locations_json",
+            "target_roles_json",
+            "work_mode_preference",
             "excluded_companies_json",
             "confirmed_skills_json",
             "competencies_json",
@@ -133,6 +137,96 @@ def _guess_seniority(text: str) -> str:
     return "senior"
 
 
+def _dedupe_preserving_order(values: list[str]) -> list[str]:
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        cleaned = str(value or "").strip()
+        if not cleaned:
+            continue
+        key = cleaned.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        ordered.append(cleaned)
+    return ordered
+
+
+def _normalize_work_mode(value: Any) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized in KNOWN_WORK_MODES:
+        return normalized
+    if "remote" in normalized:
+        return "remote"
+    if "hybrid" in normalized:
+        return "hybrid"
+    if normalized in {"on site", "on-site"} or "onsite" in normalized or "in office" in normalized:
+        return "onsite"
+    return "unspecified"
+
+
+def _infer_work_mode_preference(preferred_locations: list[str], context_text: str = "") -> str:
+    for value in [*preferred_locations, context_text]:
+        work_mode = _normalize_work_mode(value)
+        if work_mode != "unspecified":
+            return work_mode
+    return "unspecified"
+
+
+def profile_search_constraints(profile: CandidateProfile | dict[str, Any]) -> dict[str, Any]:
+    profile_data = _profile_data_dict(profile)
+    extracted_summary = profile_data.get("extracted_summary_json") or {}
+    structured_profile = extracted_summary.get(PROFILE_SCHEMA_KEY) if isinstance(extracted_summary.get(PROFILE_SCHEMA_KEY), dict) else {}
+    if not structured_profile and isinstance(profile_data.get("structured_profile_json"), dict):
+        structured_profile = profile_data.get("structured_profile_json") or {}
+    targeting = structured_profile.get("targeting") if isinstance(structured_profile.get("targeting"), dict) else {}
+
+    explicit_locations = _dedupe_preserving_order(list(targeting.get("preferred_locations") or []))
+    fallback_locations = _dedupe_preserving_order(list(profile_data.get("preferred_locations_json") or []))
+    preferred_locations = explicit_locations or fallback_locations or ["remote"]
+
+    explicit_target_roles = _dedupe_preserving_order(list(targeting.get("target_roles") or []))
+    fallback_target_roles = _dedupe_preserving_order(
+        [
+            *(profile_data.get("core_titles_json") or []),
+            *(profile_data.get("preferred_titles_json") or []),
+        ]
+    )
+    target_roles = explicit_target_roles or fallback_target_roles or DEFAULT_TARGET_ROLES
+
+    explicit_work_mode = _normalize_work_mode(targeting.get("work_mode_preference"))
+    fallback_work_mode = _infer_work_mode_preference(
+        preferred_locations,
+        " ".join(profile_data.get("explicit_preferences_json") or []),
+    )
+    work_mode_preference = explicit_work_mode if explicit_work_mode != "unspecified" else fallback_work_mode
+
+    applied_constraints: list[str] = []
+    defaulted_constraints: list[str] = []
+    if explicit_locations:
+        applied_constraints.append("geography")
+    else:
+        defaulted_constraints.append("geography")
+    if explicit_target_roles:
+        applied_constraints.append("target_roles")
+    else:
+        defaulted_constraints.append("target_roles")
+    if explicit_work_mode != "unspecified":
+        applied_constraints.append("work_mode")
+    else:
+        defaulted_constraints.append("work_mode")
+
+    return {
+        "preferred_locations": preferred_locations,
+        "target_roles": target_roles[:4],
+        "work_mode_preference": work_mode_preference,
+        "applied_constraints": applied_constraints,
+        "defaulted_constraints": defaulted_constraints,
+        "explicit_target_roles": explicit_target_roles,
+        "explicit_work_mode": explicit_work_mode != "unspecified",
+    }
+
+
 def _extract_summary(raw_text: str) -> dict:
     titles = _match_known_terms(raw_text, KNOWN_TITLES)
     locations = _match_known_terms(raw_text, KNOWN_LOCATIONS)
@@ -143,7 +237,9 @@ def _extract_summary(raw_text: str) -> dict:
     adjacent_titles = [title for title in ["business operations", "implementation lead", "program manager"] if title not in titles]
     preferred_titles = titles[:4] or ["chief of staff", "founding operations lead"]
     core_titles = preferred_titles[:2]
+    target_roles = preferred_titles[:3] or DEFAULT_TARGET_ROLES
     stretch_families = ["go_to_market", "operations"] if "deployment strategist" in raw_text.lower() else ["operations"]
+    work_mode = _infer_work_mode_preference(locations, raw_text)
 
     return {
         "summary": f"Profile centered on {' / '.join(preferred_titles[:3])} with {seniority} seniority leaning.",
@@ -151,6 +247,8 @@ def _extract_summary(raw_text: str) -> dict:
         "adjacent_titles_json": adjacent_titles[:4],
         "core_titles_json": core_titles,
         "preferred_locations_json": locations or ["san francisco", "new york", "remote"],
+        "target_roles_json": target_roles,
+        "work_mode_preference": work_mode,
         "preferred_domains_json": domains or ["ai", "developer tools", "infra"],
         "stage_preferences_json": stages or ["early-stage", "series a"],
         "seniority_guess": seniority,
@@ -191,6 +289,8 @@ def get_candidate_profile(session: Session) -> CandidateProfile:
         excluded_titles_json=["intern", "new grad", "account executive"],
         preferred_domains_json=["ai", "developer tools", "infra"],
         preferred_locations_json=["san francisco", "new york", "remote"],
+        target_roles_json=["chief of staff", "founding operations lead"],
+        work_mode_preference="remote",
         confirmed_skills_json=["stakeholder management", "sql", "cross-functional leadership"],
         competencies_json=["operator judgment", "process design", "zero-to-one execution"],
         explicit_preferences_json=["hands-on teams", "customer-facing work", "clear scope"],
@@ -215,6 +315,7 @@ def get_candidate_profile(session: Session) -> CandidateProfile:
 def profile_to_payload(profile: CandidateProfile) -> CandidateProfilePayload:
     extracted_summary = profile.extracted_summary_json or {}
     structured_profile = extracted_summary.get(PROFILE_SCHEMA_KEY)
+    constraints = profile_search_constraints(profile)
     payload = CandidateProfilePayload(
         profile_schema_version=structured_profile.get("version", "v1") if structured_profile else "v1",
         name=profile.name,
@@ -226,6 +327,8 @@ def profile_to_payload(profile: CandidateProfile) -> CandidateProfilePayload:
         preferred_domains_json=profile.preferred_domains_json or [],
         excluded_companies_json=profile.excluded_companies_json or [],
         preferred_locations_json=profile.preferred_locations_json or [],
+        target_roles_json=constraints["target_roles"],
+        work_mode_preference=constraints["work_mode_preference"],
         seniority_guess=profile.seniority_guess,
         stage_preferences_json=profile.stage_preferences_json or [],
         core_titles_json=profile.core_titles_json or [],

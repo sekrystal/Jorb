@@ -8,8 +8,9 @@ from sqlalchemy.orm import sessionmaker
 from core.schemas import LeadResponse
 from core.models import AgentActivity, Base, Lead, Listing
 from core.schemas import SyncResult
+from services.discovery_agents import planner_agent
 from services.pipeline import ingest_user_job_link, recommendation_component_value, recommendation_score_value, run_scout_agent
-from services.profile import ingest_resume
+from services.profile import ingest_resume, update_candidate_profile
 from services.sync import sync_all
 
 
@@ -197,9 +198,36 @@ def test_recommendation_score_helpers_support_legacy_and_structured_payloads() -
         recommendation_component_value(
             {"component_metrics": [{"key": "title_fit", "score": 1.9}]},
             "title_fit",
-        )
+    )
         == 1.9
     )
+
+
+def test_planner_agent_applies_profile_driven_role_geography_and_work_mode_constraints() -> None:
+    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine, expire_on_commit=False)()
+
+    profile = ingest_resume(
+        session,
+        filename="resume.txt",
+        raw_text="Chief of staff operator based in San Francisco.",
+    ).candidate_profile
+    profile.target_roles_json = ["founding operations lead"]
+    profile.work_mode_preference = "onsite"
+    profile.preferred_locations_json = ["san francisco"]
+    saved_profile = update_candidate_profile(session, profile)
+
+    plan = planner_agent(session, saved_profile)
+
+    assert "target_roles" in plan["profile_constraints_applied"]
+    assert "work_mode" in plan["profile_constraints_applied"]
+    assert "geography" in plan["profile_constraints_applied"]
+    assert plan["target_roles"] == ["founding operations lead"]
+    assert plan["work_mode_preference"] == "onsite"
+    assert any("san francisco" in query.lower() for query in plan["queries"])
+    assert any("onsite" in query.lower() for query in plan["queries"])
+    assert not any("remote us" in query.lower() for query in plan["queries"])
 
 
 def test_run_scout_agent_records_high_evergreen_temporal_intelligence_for_old_active_listing(monkeypatch) -> None:

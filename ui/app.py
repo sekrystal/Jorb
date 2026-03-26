@@ -146,6 +146,7 @@ def apply_target_role_selection(payload: dict[str, Any], target_role: str) -> di
 
     updated["preferred_titles_json"] = preferred_titles
     updated["core_titles_json"] = core_titles[:3]
+    updated["target_roles_json"] = dedupe_preserving_order([selected_role, *(updated.get("target_roles_json") or []), *preferred_titles])[:4]
     extracted_summary["selected_target_role"] = selected_role
     updated["extracted_summary_json"] = extracted_summary
     return updated
@@ -200,6 +201,8 @@ def build_profile_update_payload(
         "preferred_domains_json": parse_csv(form_values["preferred_domains"]),
         "excluded_companies_json": parse_csv(form_values["excluded_companies"]),
         "preferred_locations_json": parse_csv(form_values["preferred_locations"]),
+        "target_roles_json": form_source.get("target_roles_json", profile.get("target_roles_json", [])),
+        "work_mode_preference": form_source.get("work_mode_preference", profile.get("work_mode_preference", "unspecified")),
         "confirmed_skills_json": parse_csv(form_values["confirmed_skills"]),
         "competencies_json": parse_csv(form_values["competencies"]),
         "explicit_preferences_json": parse_csv(form_values["explicit_preferences"]),
@@ -230,6 +233,8 @@ def build_profile_persistence_payload(
         "preferred_domains_json": profile.get("preferred_domains_json", []),
         "excluded_companies_json": profile.get("excluded_companies_json", []),
         "preferred_locations_json": profile.get("preferred_locations_json", []),
+        "target_roles_json": profile.get("target_roles_json", []),
+        "work_mode_preference": profile.get("work_mode_preference", "unspecified"),
         "confirmed_skills_json": profile.get("confirmed_skills_json", []),
         "competencies_json": profile.get("competencies_json", []),
         "explicit_preferences_json": profile.get("explicit_preferences_json", []),

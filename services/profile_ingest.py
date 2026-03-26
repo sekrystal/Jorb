@@ -16,6 +16,8 @@ def build_profile_review_rows(profile: dict[str, Any]) -> list[dict[str, str]]:
         {"field": "Adjacent titles", "value": _csv(targeting.get("adjacent_titles") or profile.get("adjacent_titles_json"))},
         {"field": "Preferred domains", "value": _csv(targeting.get("preferred_domains") or profile.get("preferred_domains_json"))},
         {"field": "Preferred locations", "value": _csv(targeting.get("preferred_locations") or profile.get("preferred_locations_json"))},
+        {"field": "Target roles", "value": _csv(targeting.get("target_roles") or profile.get("target_roles_json"))},
+        {"field": "Work mode", "value": str(targeting.get("work_mode_preference") or profile.get("work_mode_preference") or "")},
         {"field": "Preferred stages", "value": _csv(targeting.get("stage_preferences") or profile.get("stage_preferences_json"))},
         {"field": "Excluded keywords", "value": _csv(targeting.get("excluded_keywords") or profile.get("excluded_keywords_json"))},
         {"field": "Stretch role families", "value": _csv(targeting.get("stretch_role_families") or profile.get("stretch_role_families_json"))},

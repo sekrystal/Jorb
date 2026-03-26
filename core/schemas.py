@@ -133,6 +133,8 @@ def _component_trace_inputs(component_key: str, raw_score: dict[str, Any], evide
         "location_fit": [
             f"location={_format_trace_value(evidence.get('location'))}",
             f"location_scope={_format_trace_value(evidence.get('location_scope'))}",
+            f"work_mode_preference={_format_trace_value(evidence.get('work_mode_preference'))}",
+            f"work_mode_match={_format_trace_value(evidence.get('work_mode_match'))}",
         ],
         "stage_company_fit": [
             f"feedback_notes={_format_trace_value(evidence.get('feedback_notes'))}",
@@ -319,6 +321,10 @@ def normalize_recommendation_score_schema(
         "source_lineage": evidence.get("source_lineage"),
         "listing_status": evidence.get("listing_status"),
         "freshness_label": labels.get("freshness_label", raw_score.get("freshness_label")),
+        "target_roles": list(evidence.get("target_roles") or []),
+        "work_mode_preference": evidence.get("work_mode_preference"),
+        "profile_constraints_applied": list(evidence.get("profile_constraints_applied") or []),
+        "profile_constraints_defaulted": list(evidence.get("profile_constraints_defaulted") or []),
     }
     normalized["explanation"] = _build_recommendation_explanation(raw_score, component_metrics, explanation_text, labels).model_dump()
     RecommendationScoreSchema(**normalized)
@@ -371,6 +377,8 @@ class CandidateProfilePayload(BaseModel):
     preferred_domains_json: list[str] = Field(default_factory=list)
     excluded_companies_json: list[str] = Field(default_factory=list)
     preferred_locations_json: list[str] = Field(default_factory=list)
+    target_roles_json: list[str] = Field(default_factory=list)
+    work_mode_preference: str = "unspecified"
     confirmed_skills_json: list[str] = Field(default_factory=list)
     competencies_json: list[str] = Field(default_factory=list)
     explicit_preferences_json: list[str] = Field(default_factory=list)
@@ -396,6 +404,8 @@ class CandidateProfilePayload(BaseModel):
                     excluded_titles=self.excluded_titles_json,
                     preferred_domains=self.preferred_domains_json,
                     preferred_locations=self.preferred_locations_json,
+                    target_roles=self.target_roles_json,
+                    work_mode_preference=self.work_mode_preference,
                     excluded_companies=self.excluded_companies_json,
                     confirmed_skills=self.confirmed_skills_json,
                     competencies=self.competencies_json,
@@ -414,12 +424,21 @@ class CandidateProfilePayload(BaseModel):
         else:
             self.profile_schema_version = self.structured_profile_json.version
             targeting = self.structured_profile_json.targeting
+            provided_fields = getattr(self, "model_fields_set", set())
+            if "preferred_locations_json" in provided_fields:
+                targeting.preferred_locations = list(self.preferred_locations_json)
+            if "target_roles_json" in provided_fields:
+                targeting.target_roles = list(self.target_roles_json)
+            if "work_mode_preference" in provided_fields:
+                targeting.work_mode_preference = self.work_mode_preference
             self.preferred_titles_json = list(targeting.preferred_titles)
             self.core_titles_json = list(targeting.core_titles)
             self.adjacent_titles_json = list(targeting.adjacent_titles)
             self.excluded_titles_json = list(targeting.excluded_titles)
             self.preferred_domains_json = list(targeting.preferred_domains)
             self.preferred_locations_json = list(targeting.preferred_locations)
+            self.target_roles_json = list(targeting.target_roles)
+            self.work_mode_preference = targeting.work_mode_preference
             self.excluded_companies_json = list(targeting.excluded_companies)
             self.confirmed_skills_json = list(targeting.confirmed_skills)
             self.competencies_json = list(targeting.competencies)
@@ -447,6 +466,8 @@ class ProfileTargetingPreferences(BaseModel):
     excluded_titles: list[str] = Field(default_factory=list)
     preferred_domains: list[str] = Field(default_factory=list)
     preferred_locations: list[str] = Field(default_factory=list)
+    target_roles: list[str] = Field(default_factory=list)
+    work_mode_preference: str = "unspecified"
     excluded_companies: list[str] = Field(default_factory=list)
     confirmed_skills: list[str] = Field(default_factory=list)
     competencies: list[str] = Field(default_factory=list)

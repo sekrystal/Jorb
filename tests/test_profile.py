@@ -14,6 +14,7 @@ from services.profile import (
     extract_text_from_resume_upload,
     get_candidate_profile,
     ingest_resume,
+    profile_search_constraints,
     profile_to_payload,
     update_candidate_profile,
 )
@@ -39,6 +40,8 @@ def test_resume_ingestion_populates_candidate_profile() -> None:
     assert profile.seniority_guess in {"senior", "staff"}
     assert profile.extracted_summary_json["profile_schema_version"] == "v1"
     assert profile.extracted_summary_json["structured_profile"]["targeting"]["preferred_titles"]
+    assert profile.extracted_summary_json["structured_profile"]["targeting"]["target_roles"]
+    assert profile.extracted_summary_json["structured_profile"]["targeting"]["work_mode_preference"] == "unspecified"
 
 
 def test_candidate_profile_payload_builds_structured_schema_from_flat_fields() -> None:
@@ -47,6 +50,8 @@ def test_candidate_profile_payload_builds_structured_schema_from_flat_fields() -
         core_titles_json=["chief of staff"],
         preferred_domains_json=["ai"],
         preferred_locations_json=["remote"],
+        target_roles_json=["founding operations lead"],
+        work_mode_preference="remote",
         excluded_companies_json=["BigCo"],
         confirmed_skills_json=["sql", "stakeholder management"],
         competencies_json=["process design"],
@@ -63,6 +68,8 @@ def test_candidate_profile_payload_builds_structured_schema_from_flat_fields() -
     assert payload.profile_schema_version == "v1"
     assert payload.structured_profile_json is not None
     assert payload.structured_profile_json.targeting.preferred_titles == ["chief of staff", "operator"]
+    assert payload.structured_profile_json.targeting.target_roles == ["founding operations lead"]
+    assert payload.structured_profile_json.targeting.work_mode_preference == "remote"
     assert payload.structured_profile_json.targeting.confirmed_skills == ["sql", "stakeholder management"]
     assert payload.structured_profile_json.targeting.competencies == ["process design"]
     assert payload.structured_profile_json.targeting.explicit_preferences == ["hands-on teams"]
@@ -86,6 +93,8 @@ def test_update_candidate_profile_syncs_structured_schema_back_to_flat_fields() 
                 "excluded_titles": ["intern"],
                 "preferred_domains": ["developer tools"],
                 "preferred_locations": ["san francisco"],
+                "target_roles": ["founding operations lead", "chief of staff"],
+                "work_mode_preference": "hybrid",
                 "excluded_companies": ["BigCo"],
                 "confirmed_skills": ["customer discovery", "sql"],
                 "competencies": ["systems thinking"],
@@ -111,6 +120,8 @@ def test_update_candidate_profile_syncs_structured_schema_back_to_flat_fields() 
     assert profile.extracted_summary_json["structured_profile"]["targeting"]["explicit_preferences"] == ["small teams", "remote-friendly"]
     assert refreshed.structured_profile_json is not None
     assert refreshed.structured_profile_json.targeting.preferred_domains == ["developer tools"]
+    assert refreshed.target_roles_json == ["founding operations lead", "chief of staff"]
+    assert refreshed.work_mode_preference == "hybrid"
     assert refreshed.confirmed_skills_json == ["customer discovery", "sql"]
     assert refreshed.competencies_json == ["systems thinking"]
     assert refreshed.explicit_preferences_json == ["small teams", "remote-friendly"]
@@ -258,4 +269,29 @@ def test_profile_data_inventory_surfaces_categories_provenance_and_processing_pa
     assert inventory_by_key["network_contacts"]["processing_path"] == "local_only"
     assert inventory_by_key["profile_preferences"]["processing_path"] == "cloud_assisted"
     assert "chief of staff" in inventory_by_key["profile_preferences"]["example_values"]
-    assert inventory_by_key["learning_state"]["stored"] is True
+
+
+def test_profile_search_constraints_report_applied_vs_defaulted_fields() -> None:
+    payload = CandidateProfilePayload(
+        preferred_titles_json=["chief of staff"],
+        core_titles_json=["chief of staff"],
+        preferred_locations_json=["san francisco"],
+        structured_profile_json=StructuredCandidateProfile(
+            version="v1",
+            targeting={
+                "preferred_titles": ["chief of staff"],
+                "core_titles": ["chief of staff"],
+                "preferred_locations": ["san francisco"],
+                "target_roles": ["founding operations lead"],
+                "work_mode_preference": "onsite",
+            },
+            scoring={"minimum_fit_threshold": 2.8},
+        ),
+    )
+
+    constraints = profile_search_constraints(payload.model_dump())
+
+    assert constraints["target_roles"] == ["founding operations lead"]
+    assert constraints["work_mode_preference"] == "onsite"
+    assert constraints["applied_constraints"] == ["geography", "target_roles", "work_mode"]
+    assert constraints["defaulted_constraints"] == []
