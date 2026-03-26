@@ -448,7 +448,8 @@ def test_streamlit_jobs_shell_demotes_job_link_and_moves_operator_access_out_of_
     assert app_source.index('render_jobs_screen(') < app_source.index('with st.expander("Add a job link", expanded=False):')
     assert "show_operator_console" in app_source
     assert "render_operator_sidebar" in app_source
-    assert "Open operator console" in sidebar_source
+    assert 'with st.sidebar.expander("Admin / debug", expanded=False):' in sidebar_source
+    assert "Open validation tools" in sidebar_source
     assert "Back to jobs shell" in sidebar_source
     assert 'with st.sidebar.expander("Operator surfaces"' not in sidebar_source
 
