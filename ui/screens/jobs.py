@@ -59,13 +59,31 @@ def _work_mode_from_evidence(evidence: dict[str, Any]) -> tuple[str, bool]:
     return "TODO work mode", True
 
 
+def _source_fields(lead: dict[str, Any], evidence: dict[str, Any]) -> tuple[str, str]:
+    source = (
+        lead.get("source_type")
+        or evidence.get("source_type")
+        or lead.get("source_platform")
+        or evidence.get("source_platform")
+        or "unknown"
+    )
+    provenance = (
+        lead.get("source_lineage")
+        or evidence.get("source_lineage")
+        or lead.get("source_platform")
+        or evidence.get("source_platform")
+        or source
+    )
+    return str(source), str(provenance)
+
+
 def build_job_view_model(lead: dict[str, Any]) -> dict[str, Any]:
     evidence = lead.get("evidence_json") or {}
     score_payload = lead.get("score_breakdown_json") or {}
     description, description_missing = _description_from_evidence(evidence)
     full_description, full_description_missing = _full_description_from_evidence(evidence)
     work_mode, work_mode_missing = _work_mode_from_evidence(evidence)
-    source = lead.get("source_lineage") or lead.get("source_platform") or lead.get("source_type")
+    source, source_provenance = _source_fields(lead, evidence)
     state = "applied" if lead.get("applied") else "saved" if lead.get("saved") else "new"
     tags = [
         item
@@ -73,7 +91,7 @@ def build_job_view_model(lead: dict[str, Any]) -> dict[str, Any]:
             lead.get("freshness_label"),
             lead.get("qualification_fit_label"),
             lead.get("confidence_label"),
-            source,
+            source_provenance,
         ]
         if item
     ][:4]
@@ -107,6 +125,7 @@ def build_job_view_model(lead: dict[str, Any]) -> dict[str, Any]:
         "posted_date": lead.get("posted_at") or lead.get("surfaced_at") or "Unknown date",
         "salary": evidence.get("salary") or None,
         "source": source,
+        "source_provenance": source_provenance,
         "state": state,
         "why_this_job": (score_payload.get("explanation") or {}).get("summary") or lead.get("explanation"),
         "what_you_are_missing": (
@@ -188,6 +207,7 @@ def render_job_detail_panel(
     st.markdown("### Job detail")
     st.markdown(f"**{job['title']}**")
     st.caption(f"{job['company']} • {job['location']} • {job['work_mode']}")
+    st.caption(f"Source: {job['source']} • Provenance: {job['source_provenance']}")
     stat_cols = st.columns(2)
     stat_cols[0].metric("Match", job["match_score_display"])
     stat_cols[1].metric("Label", job["match_label"])

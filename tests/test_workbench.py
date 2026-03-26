@@ -500,7 +500,8 @@ def test_build_job_view_model_uses_real_fields_and_explicit_placeholders() -> No
             "freshness_label": "fresh",
             "qualification_fit_label": "strong fit",
             "confidence_label": "high",
-            "source_lineage": "greenhouse",
+            "source_type": "greenhouse",
+            "source_lineage": "greenhouse+search_web",
             "score_breakdown_json": {
                 "final_score": 8.4,
                 "recommendation_band": "strong",
@@ -521,6 +522,8 @@ def test_build_job_view_model_uses_real_fields_and_explicit_placeholders() -> No
     assert job["company"] == "Mercor"
     assert job["work_mode"] == "remote"
     assert job["match_score_display"] == "8.4"
+    assert job["source"] == "greenhouse"
+    assert job["source_provenance"] == "greenhouse+search_web"
     assert "description" not in job["backend_gaps"]
 
 
@@ -546,6 +549,35 @@ def test_build_job_view_model_marks_missing_fields_explicitly() -> None:
     assert "work_mode" in job["backend_gaps"]
     assert "description" in job["backend_gaps"]
     assert job["location"] == "TODO location"
+
+
+def test_build_job_view_model_exposes_explicit_source_and_provenance_fields() -> None:
+    job = build_job_view_model(
+        {
+            "id": 19,
+            "company_name": "Acme",
+            "primary_title": "Founding Operations Lead",
+            "saved": False,
+            "applied": False,
+            "rank_label": "strong",
+            "freshness_label": "fresh",
+            "qualification_fit_label": "strong fit",
+            "confidence_label": "high",
+            "source_type": "yc_jobs",
+            "source_lineage": "yc_jobs+search_web",
+            "score_breakdown_json": {"final_score": 8.1, "recommendation_band": "strong", "explanation": {"headline": "Strong recommendation"}},
+            "evidence_json": {
+                "location": "San Francisco, CA",
+                "description_text": "Lead founder operations and recruiting systems.",
+            },
+            "surfaced_at": "2026-03-24T12:00:00Z",
+            "url": "https://www.workatastartup.com/jobs/12345",
+        }
+    )
+
+    assert job["source"] == "yc_jobs"
+    assert job["source_provenance"] == "yc_jobs+search_web"
+    assert "yc_jobs+search_web" in job["tags"]
 
 
 def test_jobs_backend_gap_frame_flattens_missing_fields() -> None:

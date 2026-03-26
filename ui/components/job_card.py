@@ -98,7 +98,16 @@ def render_job_card(
     work_mode = job.get("work_mode") or "TODO work mode"
     tags = "".join(f'<span class="jorb-job-tag">{tag}</span>' for tag in job.get("tags", [])[:4])
     state_label = _state_label(job)
-    metadata = " • ".join(item for item in [job.get("posted_date"), job.get("salary"), job.get("source")] if item)
+    metadata = " • ".join(
+        item
+        for item in [
+            job.get("posted_date"),
+            job.get("salary"),
+            f"Source: {job.get('source')}" if job.get("source") else None,
+            f"Provenance: {job.get('source_provenance')}" if job.get("source_provenance") else None,
+        ]
+        if item
+    )
     st.markdown(
         f"""
         <div class="{card_class}">
