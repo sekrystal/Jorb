@@ -25,12 +25,18 @@ Deployment and operations docs:
 
 ## What The Product Is Now
 
-The app is a table-first workbench with eight views:
+The app is a table-first workbench with a jobs-first product shell plus a separate operator console.
+
+Primary product shell:
 
 - `Leads`: active ranked shortlist
 - `Saved`: saved-for-later roles
 - `Applied`: application tracker
 - `Profile`: resume upload and candidate profile editing
+
+Operator console:
+
+- `Discovery`: planner output, source health slices, and expansion visibility
 - `Agent Activity`: pipeline controls and event log
 - `Investigations`: unresolved weak-signal cases and rechecks
 - `Learning`: query performance, watchlist growth, and follow-up tasks
@@ -539,7 +545,9 @@ Production JS shell notes:
 - dev API wiring: the Vite proxy forwards `/api/*` to `http://127.0.0.1:8000/*`
 - backend contract pattern: the JS client reads `/opportunities`, `/candidate-profile`, and `/applications/status`
 - profile UX: onboarding and `Profile` both edit lightweight search preferences for target roles, geography, and work mode without exposing operator-heavy internals
-- Streamlit remains the temporary validation harness for operator and diagnostic surfaces at `http://127.0.0.1:8500`
+- Streamlit remains the temporary validation harness at `http://127.0.0.1:8500`
+- the default Streamlit shell is jobs-first, with `Jobs`, `Saved`, `Applied`, and `Profile` kept primary
+- operator-heavy surfaces move behind the separate `Open operator console` path instead of sharing the default user-facing shell
 - the JS shell intentionally does not expose `source matrix`, `discovery internals`, `learning`, `autonomy ops`, `agent activity`, `investigations`, `diagnostics`, or `operator controls` as product entry points
 
 Portable SQLite config:

@@ -51,12 +51,7 @@ def _health_label(health: dict[str, Any] | None) -> tuple[str, str]:
     return "Healthy", "#10b981"
 
 
-def render_sidebar(
-    *,
-    stats: dict[str, Any] | None,
-    runtime: dict[str, Any] | None,
-    health: dict[str, Any] | None,
-) -> tuple[str | None, str | None]:
+def _render_sidebar_chrome(*, title: str, caption: str) -> None:
     st.sidebar.markdown(
         """
         <style>
@@ -98,23 +93,11 @@ def render_sidebar(
         """,
         unsafe_allow_html=True,
     )
-    st.sidebar.markdown('<div class="jorb-sidebar-title">Jorb</div>', unsafe_allow_html=True)
-    st.sidebar.caption("Jobs-first workbench")
+    st.sidebar.markdown(f'<div class="jorb-sidebar-title">{title}</div>', unsafe_allow_html=True)
+    st.sidebar.caption(caption)
 
-    primary_page = st.sidebar.radio("Navigate", PRIMARY_PAGES, index=0, label_visibility="collapsed")
 
-    operator_page: str | None = None
-    with st.sidebar.expander("Operator surfaces", expanded=False):
-        operator_page = st.radio(
-            "Operator surfaces",
-            ["None", *OPERATOR_PAGES],
-            index=0,
-            key="operator-surface-nav",
-            label_visibility="collapsed",
-        )
-        if operator_page == "None":
-            operator_page = None
-
+def _render_system_status(*, stats: dict[str, Any] | None, runtime: dict[str, Any] | None, health: dict[str, Any] | None) -> None:
     last_run = _format_relative_timestamp((runtime or {}).get("last_successful_cycle_at"))
     jobs_found = (stats or {}).get("total_leads", "n/a")
     health_text, health_color = _health_label(health)
@@ -132,4 +115,30 @@ def render_sidebar(
         """,
         unsafe_allow_html=True,
     )
-    return primary_page, operator_page
+
+
+def render_sidebar(
+    *,
+    stats: dict[str, Any] | None,
+    runtime: dict[str, Any] | None,
+    health: dict[str, Any] | None,
+) -> tuple[str, bool]:
+    _render_sidebar_chrome(title="Jorb", caption="Jobs-first workbench")
+    primary_page = st.sidebar.radio("Navigate", PRIMARY_PAGES, index=0, label_visibility="collapsed")
+    _render_system_status(stats=stats, runtime=runtime, health=health)
+    st.sidebar.caption("Need discovery internals or diagnostics?")
+    open_operator_console = st.sidebar.button("Open operator console", use_container_width=True)
+    return primary_page, open_operator_console
+
+
+def render_operator_sidebar(
+    *,
+    stats: dict[str, Any] | None,
+    runtime: dict[str, Any] | None,
+    health: dict[str, Any] | None,
+) -> tuple[str, bool]:
+    _render_sidebar_chrome(title="Jorb Operator", caption="Diagnostics and runtime control")
+    operator_page = st.sidebar.radio("Operator navigate", OPERATOR_PAGES, index=0, label_visibility="collapsed")
+    _render_system_status(stats=stats, runtime=runtime, health=health)
+    back_to_jobs = st.sidebar.button("Back to jobs shell", use_container_width=True)
+    return operator_page, back_to_jobs

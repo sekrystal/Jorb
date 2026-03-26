@@ -8,6 +8,7 @@ import requests
 
 from services.profile_ingest import build_profile_review_rows
 from ui import app as ui_app
+from ui.components import sidebar as sidebar_component
 from ui.app import filter_and_sort_table
 from ui.screens.jobs import build_job_view_model, jobs_backend_gap_frame
 
@@ -431,6 +432,25 @@ def test_js_saved_and_applied_pages_use_shared_tracker_workspace() -> None:
     assert "Open Applied tracker" in source
     assert "Tracker timeline" in source
     assert "Follow-up due" in source
+
+
+def test_streamlit_primary_navigation_keeps_product_pages_separate_from_operator_pages() -> None:
+    assert sidebar_component.PRIMARY_PAGES == ["Jobs", "Saved", "Applied", "Profile"]
+    assert sidebar_component.OPERATOR_PAGES == ["Discovery", "Agent Activity", "Investigations", "Learning", "Autonomy Ops"]
+    assert not set(sidebar_component.PRIMARY_PAGES) & set(sidebar_component.OPERATOR_PAGES)
+
+
+def test_streamlit_jobs_shell_demotes_job_link_and_moves_operator_access_out_of_primary_nav() -> None:
+    app_source = Path("ui/app.py").read_text()
+    sidebar_source = Path("ui/components/sidebar.py").read_text()
+
+    assert 'with st.expander("Add a job link", expanded=False):' in app_source
+    assert app_source.index('render_jobs_screen(') < app_source.index('with st.expander("Add a job link", expanded=False):')
+    assert "show_operator_console" in app_source
+    assert "render_operator_sidebar" in app_source
+    assert "Open operator console" in sidebar_source
+    assert "Back to jobs shell" in sidebar_source
+    assert 'with st.sidebar.expander("Operator surfaces"' not in sidebar_source
 
 
 def test_rejection_feedback_summary_surfaces_structured_buckets() -> None:

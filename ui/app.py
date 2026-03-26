@@ -29,7 +29,7 @@ from services.network_import import match_referral_paths, parse_network_csv
 from services.profile import attach_network_import, build_profile_data_inventory, extract_network_import
 from services.profile_ingest import build_profile_review_rows
 from services.pipeline import ingest_user_job_link
-from ui.components.sidebar import render_sidebar
+from ui.components.sidebar import render_operator_sidebar, render_sidebar
 from ui.screens.jobs import render_jobs_screen
 
 
@@ -62,6 +62,7 @@ FRESHNESS_ORDER = {"fresh": 0, "recent": 1, "stale": 2, "unknown": 3}
 FIT_ORDER = {"strong fit": 0, "adjacent": 1, "stretch": 2, "unclear": 3, "overqualified": 4, "underqualified": 5}
 CONFIDENCE_ORDER = {"high": 0, "medium": 1, "low": 2}
 STATUS_ORDER = {status: index for index, status in enumerate(APPLICATION_STATUSES)}
+OPERATOR_CONSOLE_STATE_KEY = "show_operator_console"
 
 
 class TableFilters(dict):
@@ -95,6 +96,14 @@ def fetch_optional_json(path: str) -> Optional[dict[str, Any]]:
         return fetch_json(path)
     except requests.exceptions.RequestException:
         return None
+
+
+def operator_console_enabled() -> bool:
+    return bool(st.session_state.get(OPERATOR_CONSOLE_STATE_KEY, False))
+
+
+def set_operator_console(enabled: bool) -> None:
+    st.session_state[OPERATOR_CONSOLE_STATE_KEY] = enabled
 
 
 def parse_csv(value: str) -> list[str]:
@@ -964,7 +973,6 @@ def render_detail(lead: dict[str, Any], key: str, profile: dict[str, Any]) -> No
 
 
 def render_user_job_link_form() -> None:
-    st.markdown("#### Add job link")
     st.caption("Submit a job URL with minimal context. It will be normalized into the same listing-to-lead evaluation flow and marked as user-submitted provenance.")
     with st.form("user-job-link-form"):
         top = st.columns(3)
@@ -1565,7 +1573,6 @@ def render_autonomy_ops_tab() -> None:
 def main() -> None:
     st.set_page_config(page_title="Opportunity Scout", layout="wide")
     st.title("Jorb")
-    st.caption("Jobs-first opportunity intelligence, using the real backend system.")
 
     try:
         profile = fetch_json("/candidate-profile")
@@ -1577,27 +1584,48 @@ def main() -> None:
     stats = fetch_optional_json("/stats")
     runtime = fetch_optional_json("/runtime-control")
     health = fetch_optional_json("/autonomy-status")
-    primary_page, operator_page = render_sidebar(stats=stats, runtime=runtime, health=health)
 
-    with st.sidebar.expander("Advanced filters", expanded=False):
-        freshness_choice = st.selectbox("Default freshness window", ["7 days", "14 days", "all"], index=1)
-        lead_visibility = st.toggle("Show signal-only leads", value=False)
-        include_hidden = st.toggle("Show hidden leads", value=False)
-        include_unqualified = st.toggle("Show under or overqualified", value=False)
-    freshness_map = {"7 days": 7, "14 days": 14, "all": 0}
+    if operator_console_enabled():
+        st.caption("Operator console for discovery status, investigations, learning, and autonomy diagnostics.")
+        primary_page, back_to_jobs = render_operator_sidebar(stats=stats, runtime=runtime, health=health)
+        if back_to_jobs:
+            set_operator_console(False)
+            st.rerun()
+    else:
+        st.caption("Jobs-first opportunity intelligence, using the real backend system.")
+        primary_page, open_operator_console = render_sidebar(stats=stats, runtime=runtime, health=health)
+        if open_operator_console:
+            set_operator_console(True)
+            st.rerun()
 
-    base_query = build_query(
-        freshness_days=freshness_map[freshness_choice],
-        include_hidden=include_hidden,
-        include_unqualified=include_unqualified,
-        include_signal_only=lead_visibility,
-    )
+        with st.sidebar.expander("Advanced filters", expanded=False):
+            freshness_choice = st.selectbox("Default freshness window", ["7 days", "14 days", "all"], index=1)
+            lead_visibility = st.toggle("Show signal-only leads", value=False)
+            include_hidden = st.toggle("Show hidden leads", value=False)
+            include_unqualified = st.toggle("Show under or overqualified", value=False)
 
-    if operator_page:
-        primary_page = operator_page
+        freshness_map = {"7 days": 7, "14 days": 14, "all": 0}
+        base_query = build_query(
+            freshness_days=freshness_map[freshness_choice],
+            include_hidden=include_hidden,
+            include_unqualified=include_unqualified,
+            include_signal_only=lead_visibility,
+        )
+
+    if operator_console_enabled():
+        if primary_page == "Discovery":
+            render_discovery_tab()
+        elif primary_page == "Agent Activity":
+            render_agent_activity_tab()
+        elif primary_page == "Investigations":
+            render_investigations_tab()
+        elif primary_page == "Learning":
+            render_learning_tab()
+        elif primary_page == "Autonomy Ops":
+            render_autonomy_ops_tab()
+        return
 
     if primary_page == "Jobs":
-        render_user_job_link_form()
         leads = fetch_json(base_query)["items"]
         render_jobs_screen(
             leads=leads,
@@ -1607,6 +1635,9 @@ def main() -> None:
             last_updated=datetime.now(),
             send_feedback_fn=send_feedback,
         )
+        st.divider()
+        with st.expander("Add a job link", expanded=False):
+            render_user_job_link_form()
     elif primary_page == "Saved":
         saved = fetch_json(
             build_query(
@@ -1645,16 +1676,6 @@ def main() -> None:
         )
     elif primary_page == "Profile":
         render_profile_tab(profile, learning)
-    elif primary_page == "Discovery":
-        render_discovery_tab()
-    elif primary_page == "Agent Activity":
-        render_agent_activity_tab()
-    elif primary_page == "Investigations":
-        render_investigations_tab()
-    elif primary_page == "Learning":
-        render_learning_tab()
-    elif primary_page == "Autonomy Ops":
-        render_autonomy_ops_tab()
 
 
 if __name__ == "__main__":
