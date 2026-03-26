@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
+from pathlib import Path
 
 import pandas as pd
 import requests
@@ -417,6 +418,19 @@ def test_update_application_status_includes_structured_rejection_feedback(monkey
         "status_reason_code": "panel_decline",
         "outcome_reason_code": "insufficient_pricing_depth",
     }
+
+
+def test_js_saved_and_applied_pages_use_shared_tracker_workspace() -> None:
+    source = Path("frontend/src/views/LeadPages.tsx").read_text()
+
+    assert 'surface="saved"' in source
+    assert 'surface="applied"' in source
+    assert 'description="Continue from the main jobs flow with saved roles backed by persisted tracker records."' in source
+    assert 'description="Work the applied tracker as a first-class product surface with real status and follow-up data."' in source
+    assert "Open Saved queue" in source
+    assert "Open Applied tracker" in source
+    assert "Tracker timeline" in source
+    assert "Follow-up due" in source
 
 
 def test_rejection_feedback_summary_surfaces_structured_buckets() -> None:

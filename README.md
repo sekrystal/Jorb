@@ -372,6 +372,8 @@ Expiration patterns include:
 
 Saved and Applied are real persisted states.
 
+In the JS front end, `Saved` and `Applied` now reuse the same product workspace as `Jobs` instead of falling back to a temporary tracker table. Saving or applying a role keeps the user in the main flow and exposes the tracker queue directly from that handoff point.
+
 The tracker stores:
 
 - `lead_id`
@@ -585,7 +587,7 @@ pytest
 1. Run `python scripts/reset_demo.py`.
 2. Open `Leads` and show the clean default shortlist.
 3. Open Mercor and show the explanation, source evidence, and agent trace.
-4. Switch to `Saved` and `Applied` to show real workflow state.
+4. Save or apply a role from `Jobs`, then switch to `Saved` and `Applied` to show the same workspace carrying real tracker state.
 5. Open `Investigations` and show unresolved weak signals, confidence, attempts, and next recheck time.
 6. Open `Learning` and show source query stats, watchlist items, and the Mercor follow-up task.
 7. Open `Agent Activity`, click `Run once`, and show the next cycle summary and activity updates.

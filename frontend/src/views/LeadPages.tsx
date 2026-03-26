@@ -1,3 +1,4 @@
+import { Link } from "react-router-dom";
 import { useEffect, useMemo, useState } from "react";
 import { getLeads, setApplicationStatus, type Lead } from "../lib/api";
 
@@ -5,6 +6,7 @@ const SAVED_PARAMS = { only_saved: true };
 const APPLIED_PARAMS = { only_applied: true };
 
 type LeadViewProps = {
+  surface: "jobs" | "saved" | "applied";
   title: string;
   description: string;
   params?: Record<string, string | boolean | number | undefined>;
@@ -33,6 +35,12 @@ type JobViewModel = {
   currentStatus: string;
   state: "new" | "saved" | "applied";
   link: string | null;
+  savedAt: string | null;
+  appliedAt: string | null;
+  applicationUpdatedAt: string | null;
+  nextAction: string | null;
+  followUpDue: boolean;
+  notes: string | null;
   rawLead: Lead;
 };
 
@@ -239,6 +247,12 @@ function buildJobViewModel(lead: Lead): JobViewModel {
     currentStatus: lead.current_status || (lead.applied ? "applied" : lead.saved ? "saved" : "new"),
     state: lead.applied ? "applied" : lead.saved ? "saved" : "new",
     link: lead.url || null,
+    savedAt: lead.date_saved || null,
+    appliedAt: lead.date_applied || null,
+    applicationUpdatedAt: lead.application_updated_at || null,
+    nextAction: lead.next_action || null,
+    followUpDue: Boolean(lead.follow_up_due),
+    notes: lead.application_notes || null,
     rawLead: lead,
   };
 }
@@ -254,34 +268,45 @@ function sortJobs(items: JobViewModel[], sortBy: SortMode) {
   return [...items].sort((left, right) => Number(right.matchScore) - Number(left.matchScore));
 }
 
-function JobsListSummary({ jobs }: { jobs: JobViewModel[] }) {
+function JobsListSummary({ jobs, surface }: { jobs: JobViewModel[]; surface: LeadViewProps["surface"] }) {
   const remoteCount = jobs.filter((job) => job.workMode === "remote").length;
   const todayCount = jobs.filter((job) => relativeDayBucket(job.rawLead.posted_at || job.rawLead.surfaced_at) === "today").length;
   const strongCount = jobs.filter((job) => job.matchLabel === "Strong Match").length;
   const uniqueSources = new Set(jobs.map((job) => job.sourceProvenance || job.source)).size;
+  const followUpDueCount = jobs.filter((job) => job.followUpDue).length;
+  const appliedCount = jobs.filter((job) => job.state === "applied").length;
+
+  const cards =
+    surface === "saved"
+      ? [
+          { label: "Saved roles", value: jobs.length, copy: "Roles carried forward from the main shortlist for follow-up." },
+          { label: "Ready to apply", value: strongCount, copy: "Saved roles still sitting in the strongest recommendation band." },
+          { label: "Remote", value: remoteCount, copy: "Saved roles marked remote in normalized listing evidence." },
+          { label: "Moved forward", value: appliedCount, copy: "Saved roles that already advanced into the applied tracker." },
+        ]
+      : surface === "applied"
+        ? [
+            { label: "Applied roles", value: jobs.length, copy: "Live tracker rows sourced from persisted application records." },
+            { label: "Follow-up due", value: followUpDueCount, copy: "Applied roles with a due follow-up task attached to the tracker." },
+            { label: "Updated today", value: todayCount, copy: "Tracker rows with a recent status or application update timestamp." },
+            { label: "Sources", value: uniqueSources, copy: "Distinct provenance lines represented in the applied tracker." },
+          ]
+        : [
+            { label: "Today", value: todayCount, copy: "Fresh opportunities surfaced in the current shortlist." },
+            { label: "Remote", value: remoteCount, copy: "Roles marked remote in listing evidence or normalized location." },
+            { label: "Strong Match", value: strongCount, copy: "Roles currently sitting in the strongest recommendation band." },
+            { label: "Sources", value: uniqueSources, copy: "Distinct source provenance lines represented in this shortlist." },
+          ];
 
   return (
     <section className="jobs-summary-grid" aria-label="Jobs summary">
-      <article className="jobs-summary-card">
-        <span className="detail-label">Today</span>
-        <strong>{todayCount}</strong>
-        <p>Fresh opportunities surfaced in the current shortlist.</p>
-      </article>
-      <article className="jobs-summary-card">
-        <span className="detail-label">Remote</span>
-        <strong>{remoteCount}</strong>
-        <p>Roles marked remote in listing evidence or normalized location.</p>
-      </article>
-      <article className="jobs-summary-card">
-        <span className="detail-label">Strong Match</span>
-        <strong>{strongCount}</strong>
-        <p>Roles currently sitting in the strongest recommendation band.</p>
-      </article>
-      <article className="jobs-summary-card">
-        <span className="detail-label">Sources</span>
-        <strong>{uniqueSources}</strong>
-        <p>Distinct source provenance lines represented in this shortlist.</p>
-      </article>
+      {cards.map((card) => (
+        <article className="jobs-summary-card" key={card.label}>
+          <span className="detail-label">{card.label}</span>
+          <strong>{card.value}</strong>
+          <p>{card.copy}</p>
+        </article>
+      ))}
     </section>
   );
 }
@@ -419,6 +444,7 @@ function JobCard({
 
 function DetailPanel({
   job,
+  surface,
   onClose,
   onSave,
   onApply,
@@ -426,12 +452,16 @@ function DetailPanel({
   applying,
 }: {
   job: JobViewModel;
+  surface: LeadViewProps["surface"];
   onClose: () => void;
   onSave: () => void;
   onApply: () => void;
   saving: boolean;
   applying: boolean;
 }) {
+  const trackerRoute = job.state === "applied" ? "/applied" : "/saved";
+  const trackerLabel = job.state === "applied" ? "Open Applied tracker" : "Open Saved queue";
+
   return (
     <aside className="job-detail-panel" aria-label="Job detail">
       <div className="job-detail-header">
@@ -505,6 +535,11 @@ function DetailPanel({
               Open source
             </a>
           ) : null}
+          {job.state !== "new" && surface === "jobs" ? (
+            <Link className="ghost-link" to={trackerRoute}>
+              {trackerLabel}
+            </Link>
+          ) : null}
         </div>
         <section className="detail-callout is-blue">
           <span className="detail-label">Why this job</span>
@@ -530,6 +565,28 @@ function DetailPanel({
           <span className="detail-label">Current status</span>
           <p>{job.currentStatus}</p>
         </section>
+        {job.savedAt || job.appliedAt || job.applicationUpdatedAt ? (
+          <section className="detail-callout is-neutral">
+            <span className="detail-label">Tracker timeline</span>
+            <p>
+              {job.savedAt ? `Saved ${isoToDateLabel(job.savedAt)}. ` : ""}
+              {job.appliedAt ? `Applied ${isoToDateLabel(job.appliedAt)}. ` : ""}
+              {job.applicationUpdatedAt ? `Last tracker update ${relativeTimeLabel(job.applicationUpdatedAt)}.` : ""}
+            </p>
+          </section>
+        ) : null}
+        {job.nextAction ? (
+          <section className={`detail-callout${job.followUpDue ? " is-amber" : " is-green"}`}>
+            <span className="detail-label">{job.followUpDue ? "Follow-up due" : "Next action"}</span>
+            <p>{job.nextAction}</p>
+          </section>
+        ) : null}
+        {job.notes ? (
+          <section className="detail-callout is-neutral">
+            <span className="detail-label">Tracker notes</span>
+            <p>{job.notes}</p>
+          </section>
+        ) : null}
       </div>
     </aside>
   );
@@ -555,7 +612,7 @@ function LoadingState() {
   );
 }
 
-function JobsWorkspace({ title, description, params }: LeadViewProps) {
+function JobsWorkspace({ surface, title, description, params }: LeadViewProps) {
   const [items, setItems] = useState<Lead[]>([]);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -567,6 +624,7 @@ function JobsWorkspace({ title, description, params }: LeadViewProps) {
   const [remoteOnly, setRemoteOnly] = useState(false);
   const [sortBy, setSortBy] = useState<SortMode>("match");
   const [pendingAction, setPendingAction] = useState<{ leadId: number; action: "saved" | "applied" } | null>(null);
+  const [recentTransition, setRecentTransition] = useState<"saved" | "applied" | null>(null);
   const paramsKey = JSON.stringify(params ?? {});
 
   useEffect(() => {
@@ -621,10 +679,23 @@ function JobsWorkspace({ title, description, params }: LeadViewProps) {
   }, [jobs, locationQuery, remoteOnly, searchQuery, sortBy]);
 
   const selectedJob = filteredJobs.find((job) => job.id === selectedId) ?? null;
+  const trackerTransition =
+    recentTransition === "saved"
+      ? { label: "Role moved into Saved", route: "/saved", action: "Open Saved queue" }
+      : recentTransition === "applied"
+        ? { label: "Role moved into Applied", route: "/applied", action: "Open Applied tracker" }
+        : null;
+  const workspaceCopy =
+    surface === "saved"
+      ? "Keep follow-up roles in the same product flow, then move the right ones into Applied when you act."
+      : surface === "applied"
+        ? "Review live tracker state, follow-up prompts, and the original job context without leaving the main workbench."
+        : "Review the live shortlist first, then inspect one role in context without leaving the page.";
 
   function updateLeadStatus(leadId: number, currentStatus: "saved" | "applied") {
     setPendingAction({ leadId, action: currentStatus });
     setError(null);
+    setRecentTransition(null);
     setItems((current) =>
       current.map((lead) =>
         lead.id === leadId
@@ -641,6 +712,7 @@ function JobsWorkspace({ title, description, params }: LeadViewProps) {
     );
     setApplicationStatus({ lead_id: leadId, current_status: currentStatus })
       .then(() => {
+        setRecentTransition(currentStatus);
         setRefreshNonce((value) => value + 1);
       })
       .catch((err: Error) => {
@@ -664,9 +736,20 @@ function JobsWorkspace({ title, description, params }: LeadViewProps) {
             <strong>{filteredJobs.length}</strong>
             <span>{filteredJobs.length === 1 ? "job" : "jobs"}</span>
           </div>
-          <p>Review the live shortlist first, then inspect one role in context without leaving the page.</p>
+          <p>{workspaceCopy}</p>
         </div>
       </div>
+      {trackerTransition ? (
+        <div className="tracker-transition-banner">
+          <div>
+            <span className="detail-label">Tracker updated</span>
+            <p>{trackerTransition.label}. The destination surface is backed by the persisted tracker state.</p>
+          </div>
+          <Link className="secondary-button" to={trackerTransition.route}>
+            {trackerTransition.action}
+          </Link>
+        </div>
+      ) : null}
       <div className="jobs-topbar">
         <label className="field-shell">
           <span className="field-label">Search</span>
@@ -716,7 +799,7 @@ function JobsWorkspace({ title, description, params }: LeadViewProps) {
       ) : null}
       {!loading && !error ? (
         <>
-          <JobsListSummary jobs={filteredJobs} />
+          <JobsListSummary jobs={filteredJobs} surface={surface} />
           <div className={`jobs-workspace${selectedJob ? " has-detail" : ""}`}>
             <div className="jobs-list-column">
               <JobsListHeader
@@ -766,6 +849,7 @@ function JobsWorkspace({ title, description, params }: LeadViewProps) {
               <DetailPanel
                 applying={pendingAction?.leadId === selectedJob.id && pendingAction.action === "applied"}
                 job={selectedJob}
+                surface={surface}
                 onApply={() => updateLeadStatus(selectedJob.id, "applied")}
                 onClose={() => setSelectedId(null)}
                 onSave={() => updateLeadStatus(selectedJob.id, "saved")}
@@ -779,86 +863,10 @@ function JobsWorkspace({ title, description, params }: LeadViewProps) {
   );
 }
 
-function LeadsTableView({ title, description, params }: LeadViewProps) {
-  const [items, setItems] = useState<Lead[]>([]);
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-  const paramsKey = JSON.stringify(params ?? {});
-
-  useEffect(() => {
-    let active = true;
-    setLoading(true);
-    setError(null);
-    getLeads(params ? JSON.parse(paramsKey) : {})
-      .then((rows) => {
-        if (active) {
-          setItems(rows);
-        }
-      })
-      .catch((err: Error) => {
-        if (active) {
-          setError(err.message);
-        }
-      })
-      .finally(() => {
-        if (active) {
-          setLoading(false);
-        }
-      });
-    return () => {
-      active = false;
-    };
-  }, [paramsKey]);
-
-  return (
-    <section className="panel">
-      <div className="panel-header">
-        <div>
-          <p className="eyebrow">Workbench</p>
-          <h3>{title}</h3>
-        </div>
-        <p className="panel-copy">{description}</p>
-      </div>
-      {loading ? <p className="state-copy">Loading current leads from FastAPI.</p> : null}
-      {error ? <p className="state-copy error-copy">{error}</p> : null}
-      {!loading && !error ? (
-        <div className="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Company</th>
-                <th>Title</th>
-                <th>Type</th>
-                <th>Freshness</th>
-                <th>Fit</th>
-                <th>Status</th>
-                <th>Source</th>
-              </tr>
-            </thead>
-            <tbody>
-              {items.map((item) => (
-                <tr key={item.id}>
-                  <td>{item.company_name}</td>
-                  <td>{item.primary_title}</td>
-                  <td>{item.lead_type}</td>
-                  <td>{item.freshness_label}</td>
-                  <td>{item.qualification_fit_label}</td>
-                  <td>{item.current_status || "new"}</td>
-                  <td>{item.source_platform || "unknown"}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          {!items.length ? <p className="state-copy">No rows matched the current backend query.</p> : null}
-        </div>
-      ) : null}
-    </section>
-  );
-}
-
 export function JobsPage() {
   return (
     <JobsWorkspace
+      surface="jobs"
       title="Jobs"
       description="Review ranked opportunities from the live FastAPI shortlist."
     />
@@ -867,9 +875,10 @@ export function JobsPage() {
 
 export function SavedPage() {
   return (
-    <LeadsTableView
+    <JobsWorkspace
+      surface="saved"
       title="Saved"
-      description="Saved rows reuse the same opportunities endpoint with a scoped product query."
+      description="Continue from the main jobs flow with saved roles backed by persisted tracker records."
       params={SAVED_PARAMS}
     />
   );
@@ -877,9 +886,10 @@ export function SavedPage() {
 
 export function AppliedPage() {
   return (
-    <LeadsTableView
+    <JobsWorkspace
+      surface="applied"
       title="Applied"
-      description="Applied rows stay in the product path and will later carry the richer tracker workflow."
+      description="Work the applied tracker as a first-class product surface with real status and follow-up data."
       params={APPLIED_PARAMS}
     />
   );
