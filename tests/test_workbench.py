@@ -326,7 +326,10 @@ def test_agentic_leads_frame_exposes_verified_ranked_slice_columns() -> None:
                 "verified": True,
                 "verification_status": "active",
                 "action_label": "Act now",
+                "explanation": "Strong recommendation at 8.70 with high confidence.",
                 "match_summary": "Strong recommendation at 8.70 with high confidence.",
+                "source_platform": "yc_jobs",
+                "source_provenance": "discovered_new",
                 "source_lineage": "yc_jobs+search_web",
                 "updated_at": "2026-03-25T12:00:00Z",
                 "url": "https://www.workatastartup.com/jobs/12345",
@@ -338,7 +341,9 @@ def test_agentic_leads_frame_exposes_verified_ranked_slice_columns() -> None:
     assert frame["verification_status"].tolist() == ["active"]
     assert frame["verified"].tolist() == ["yes"]
     assert frame["recommendation_score"].tolist() == [8.7]
-    assert frame["match_summary"].tolist() == ["Strong recommendation at 8.70 with high confidence."]
+    assert frame["explanation"].tolist() == ["Strong recommendation at 8.70 with high confidence."]
+    assert frame["source"].tolist() == ["yc_jobs"]
+    assert frame["provenance"].tolist() == ["discovered_new"]
 
 
 def test_recommendation_table_explanation_prefers_structured_score_headline() -> None:

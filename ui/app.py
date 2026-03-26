@@ -372,8 +372,9 @@ def agentic_leads_frame(agentic_leads: list[dict[str, Any]]) -> pd.DataFrame:
                 "verified": "yes" if lead.get("verified") else "no",
                 "verification_status": lead.get("verification_status") or "",
                 "action": lead.get("action_label") or "",
-                "match_summary": lead.get("match_summary") or "",
-                "source": lead.get("source_lineage") or lead.get("source_platform") or "",
+                "explanation": lead.get("explanation") or lead.get("match_summary") or "",
+                "source": lead.get("source_platform") or lead.get("source_lineage") or "",
+                "provenance": lead.get("source_provenance") or lead.get("source_lineage") or lead.get("source_platform") or "",
                 "updated_at": format_timestamp(lead.get("updated_at")),
                 "url": lead.get("url") or "",
             }

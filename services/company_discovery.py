@@ -536,6 +536,7 @@ def _agentic_lead_payload(lead: Lead, listing: Listing | None) -> dict[str, obje
     score_payload = dict(lead.score_breakdown_json or {})
     evidence = dict(lead.evidence_json or {})
     verification = dict((listing.metadata_json or {}).get("verification") or {}) if listing is not None else {}
+    match_summary = _recommendation_headline(lead)
     return {
         "lead_id": lead.id,
         "company_name": lead.company_name,
@@ -551,7 +552,8 @@ def _agentic_lead_payload(lead: Lead, listing: Listing | None) -> dict[str, obje
         "recommendation_score": _recommendation_score(lead),
         "action_label": score_payload.get("action_label"),
         "action_explanation": score_payload.get("action_explanation"),
-        "match_summary": _recommendation_headline(lead),
+        "explanation": match_summary,
+        "match_summary": match_summary,
         "verification_status": verification.get("listing_status") or (listing.listing_status if listing is not None else "unknown"),
         "dead_link_detected": bool(verification.get("dead_link_detected")),
         "verified": not bool(verification.get("dead_link_detected")) and (verification.get("listing_status") or (listing.listing_status if listing is not None else None)) == "active",

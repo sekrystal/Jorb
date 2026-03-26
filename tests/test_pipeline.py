@@ -697,6 +697,8 @@ def test_build_discovery_status_surfaces_verified_ranked_agentic_jobs() -> None:
     assert status.recent_agentic_leads[0]["verified"] is True
     assert status.recent_agentic_leads[0]["verification_status"] == "active"
     assert status.recent_agentic_leads[0]["recommendation_score"] == 8.7
+    assert status.recent_agentic_leads[0]["source_provenance"] == "discovered_new"
+    assert status.recent_agentic_leads[0]["explanation"] == "Strong recommendation at 8.70 with high confidence."
     assert status.recent_agentic_leads[0]["match_summary"] == "Strong recommendation at 8.70 with high confidence."
 
 
