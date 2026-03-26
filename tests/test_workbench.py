@@ -8,6 +8,7 @@ import requests
 from services.profile_ingest import build_profile_review_rows
 from ui import app as ui_app
 from ui.app import filter_and_sort_table
+from ui.screens.jobs import build_job_view_model, jobs_backend_gap_frame
 
 
 def test_filter_and_sort_table_filters_by_search_and_status() -> None:
@@ -428,6 +429,77 @@ def test_discovery_query_family_frame_flattens_metrics_for_ui() -> None:
     assert frame["query_family"].tolist() == ["ats_direct", "careers_broad"]
     assert frame.loc[frame["query_family"] == "ats_direct", "accepted_results"].iloc[0] == 1
     assert frame.loc[frame["query_family"] == "careers_broad", "visible_yield_count"].iloc[0] == 2
+
+
+def test_build_job_view_model_uses_real_fields_and_explicit_placeholders() -> None:
+    job = build_job_view_model(
+        {
+            "id": 17,
+            "company_name": "Mercor",
+            "primary_title": "Chief of Staff",
+            "saved": False,
+            "applied": False,
+            "rank_label": "strong",
+            "freshness_label": "fresh",
+            "qualification_fit_label": "strong fit",
+            "confidence_label": "high",
+            "source_lineage": "greenhouse",
+            "score_breakdown_json": {
+                "final_score": 8.4,
+                "recommendation_band": "strong",
+                "action_explanation": "Apply soon.",
+                "explanation": {"headline": "Strong recommendation", "summary": "High overlap with operating scope."},
+            },
+            "evidence_json": {
+                "location": "Remote - US",
+                "location_scope": "remote_us",
+                "description_text": "Run operating cadence and execution for the leadership team.",
+            },
+            "posted_at": "2026-03-24T10:00:00Z",
+            "surfaced_at": "2026-03-24T12:00:00Z",
+            "url": "https://example.com/job",
+        }
+    )
+
+    assert job["company"] == "Mercor"
+    assert job["work_mode"] == "remote"
+    assert job["match_score_display"] == "8.4"
+    assert "description" not in job["backend_gaps"]
+
+
+def test_build_job_view_model_marks_missing_fields_explicitly() -> None:
+    job = build_job_view_model(
+        {
+            "id": 18,
+            "company_name": "UnknownCo",
+            "primary_title": "Ops Lead",
+            "saved": False,
+            "applied": False,
+            "rank_label": "weak",
+            "freshness_label": "unknown",
+            "qualification_fit_label": "unclear",
+            "confidence_label": "low",
+            "source_lineage": "signal",
+            "score_breakdown_json": {},
+            "evidence_json": {},
+            "surfaced_at": "2026-03-24T12:00:00Z",
+        }
+    )
+
+    assert "work_mode" in job["backend_gaps"]
+    assert "description" in job["backend_gaps"]
+    assert job["location"] == "TODO location"
+
+
+def test_jobs_backend_gap_frame_flattens_missing_fields() -> None:
+    frame = jobs_backend_gap_frame(
+        [
+            {"lead_id": 1, "title": "Chief of Staff", "company": "Mercor", "backend_gaps": ["work_mode", "salary"]},
+            {"lead_id": 2, "title": "Ops Lead", "company": "Linear", "backend_gaps": []},
+        ]
+    )
+
+    assert frame["missing_field"].tolist() == ["work_mode", "salary"]
 
 
 def test_runtime_surface_payload_prefers_health_truth_and_merges_summaries() -> None:

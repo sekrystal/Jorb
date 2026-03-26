@@ -29,6 +29,8 @@ from services.network_import import match_referral_paths, parse_network_csv
 from services.profile import attach_network_import, build_profile_data_inventory, extract_network_import
 from services.profile_ingest import build_profile_review_rows
 from services.pipeline import ingest_user_job_link
+from ui.components.sidebar import render_sidebar
+from ui.screens.jobs import render_jobs_screen
 
 
 API_BASE_URL = os.getenv("OPPORTUNITY_SCOUT_API_URL", "http://127.0.0.1:8000")
@@ -86,6 +88,13 @@ def fetch_json(path: str, method: str = "GET", payload: Optional[dict] = None) -
             st.error(f"Leads request failed while loading `{path}`: {exc}. The rest of the page is still available.")
             return {"items": []}
         raise
+
+
+def fetch_optional_json(path: str) -> Optional[dict[str, Any]]:
+    try:
+        return fetch_json(path)
+    except requests.exceptions.RequestException:
+        return None
 
 
 def parse_csv(value: str) -> list[str]:
@@ -1485,8 +1494,8 @@ def render_autonomy_ops_tab() -> None:
 
 def main() -> None:
     st.set_page_config(page_title="Opportunity Scout", layout="wide")
-    st.title("Opportunity Scout")
-    st.caption("Ranked startup opportunities first, with the clearest reasons to pursue each one up front.")
+    st.title("Jorb")
+    st.caption("Jobs-first opportunity intelligence, using the real backend system.")
 
     try:
         profile = fetch_json("/candidate-profile")
@@ -1495,14 +1504,17 @@ def main() -> None:
         st.error("Backend unavailable. Start FastAPI first, then refresh.")
         st.stop()
 
-    toolbar = st.columns(4)
-    freshness_choice = toolbar[0].selectbox("Default freshness window", ["7 days", "14 days", "all"], index=1)
-    lead_visibility = toolbar[1].toggle("Show signal-only leads", value=False)
-    include_hidden = toolbar[2].toggle("Show hidden leads", value=False)
-    include_unqualified = toolbar[3].toggle("Show under or overqualified", value=False)
-    freshness_map = {"7 days": 7, "14 days": 14, "all": 0}
+    stats = fetch_optional_json("/stats")
+    runtime = fetch_optional_json("/runtime-control")
+    health = fetch_optional_json("/autonomy-status")
+    primary_page, operator_page = render_sidebar(stats=stats, runtime=runtime, health=health)
 
-    tabs = st.tabs(["Leads", "Saved", "Applied", "Profile", "Discovery", "Agent Activity", "Investigations", "Learning", "Autonomy Ops"])
+    with st.sidebar.expander("Advanced filters", expanded=False):
+        freshness_choice = st.selectbox("Default freshness window", ["7 days", "14 days", "all"], index=1)
+        lead_visibility = st.toggle("Show signal-only leads", value=False)
+        include_hidden = st.toggle("Show hidden leads", value=False)
+        include_unqualified = st.toggle("Show under or overqualified", value=False)
+    freshness_map = {"7 days": 7, "14 days": 14, "all": 0}
 
     base_query = build_query(
         freshness_days=freshness_map[freshness_choice],
@@ -1511,16 +1523,21 @@ def main() -> None:
         include_signal_only=lead_visibility,
     )
 
-    with tabs[0]:
-        st.subheader("Top opportunities")
-        st.caption("Start here. Review the highest-ranked jobs first, then open a row to see the recommendation rationale, evidence, and next action.")
+    if operator_page:
+        primary_page = operator_page
+
+    if primary_page == "Jobs":
         render_user_job_link_form()
         leads = fetch_json(base_query)["items"]
-        selected = render_table(leads, key="leads")
-        if selected:
-            render_detail(selected, "leads", profile)
-
-    with tabs[1]:
+        render_jobs_screen(
+            leads=leads,
+            page_key="jobs",
+            title="Jobs",
+            empty_message="No matching jobs found. Try adjusting filters or wait for the next discovery cycle.",
+            last_updated=datetime.now(),
+            send_feedback_fn=send_feedback,
+        )
+    elif primary_page == "Saved":
         saved = fetch_json(
             build_query(
                 freshness_days=freshness_map[freshness_choice],
@@ -1530,11 +1547,15 @@ def main() -> None:
                 include_signal_only=lead_visibility,
             )
         )["items"]
-        selected = render_table(saved, key="saved")
-        if selected:
-            render_detail(selected, "saved", profile)
-
-    with tabs[2]:
+        render_jobs_screen(
+            leads=saved,
+            page_key="saved",
+            title="Saved",
+            empty_message="No saved jobs yet.",
+            last_updated=datetime.now(),
+            send_feedback_fn=send_feedback,
+        )
+    elif primary_page == "Applied":
         applied = fetch_json(
             build_query(
                 freshness_days=freshness_map[freshness_choice],
@@ -1544,26 +1565,25 @@ def main() -> None:
                 include_signal_only=lead_visibility,
             )
         )["items"]
-        selected = render_table(applied, key="applied", applied_view=True)
-        if selected:
-            render_detail(selected, "applied", profile)
-
-    with tabs[3]:
+        render_jobs_screen(
+            leads=applied,
+            page_key="applied",
+            title="Applied",
+            empty_message="No applied jobs yet.",
+            last_updated=datetime.now(),
+            send_feedback_fn=send_feedback,
+        )
+    elif primary_page == "Profile":
         render_profile_tab(profile, learning)
-
-    with tabs[4]:
+    elif primary_page == "Discovery":
         render_discovery_tab()
-
-    with tabs[5]:
+    elif primary_page == "Agent Activity":
         render_agent_activity_tab()
-
-    with tabs[6]:
+    elif primary_page == "Investigations":
         render_investigations_tab()
-
-    with tabs[7]:
+    elif primary_page == "Learning":
         render_learning_tab()
-
-    with tabs[8]:
+    elif primary_page == "Autonomy Ops":
         render_autonomy_ops_tab()
 
 

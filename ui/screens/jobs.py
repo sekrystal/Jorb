@@ -1,0 +1,270 @@
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from typing import Any, Callable
+
+import pandas as pd
+import streamlit as st
+
+from ui.components.job_card import render_job_card
+from ui.components.topbar import render_jobs_topbar
+
+
+def _match_label(score_payload: dict[str, Any], lead: dict[str, Any]) -> str:
+    band = (score_payload.get("recommendation_band") or lead.get("rank_label") or "").lower()
+    if band == "strong":
+        return "Strong Match"
+    if band == "medium":
+        return "Medium Match"
+    return "Stretch"
+
+
+def _match_score_display(score_payload: dict[str, Any]) -> str:
+    final_score = score_payload.get("final_score", score_payload.get("composite"))
+    if final_score is None:
+        return "n/a"
+    try:
+        return f"{float(final_score):.1f}"
+    except (TypeError, ValueError):
+        return "n/a"
+
+
+def _description_from_evidence(evidence: dict[str, Any]) -> tuple[str, bool]:
+    description_text = (evidence.get("description_text") or "").strip()
+    if description_text:
+        compact = " ".join(description_text.split())
+        return compact[:240] + ("..." if len(compact) > 240 else ""), False
+    snippets = [snippet.strip() for snippet in (evidence.get("snippets") or []) if snippet and snippet.strip()]
+    if snippets:
+        compact = " ".join(snippets)
+        return compact[:240] + ("..." if len(compact) > 240 else ""), False
+    return "TODO: backend did not return a short description.", True
+
+
+def _full_description_from_evidence(evidence: dict[str, Any]) -> tuple[str, bool]:
+    description_text = (evidence.get("description_text") or "").strip()
+    if description_text:
+        return description_text, False
+    snippets = [snippet.strip() for snippet in (evidence.get("snippets") or []) if snippet and snippet.strip()]
+    if snippets:
+        return "\n\n".join(snippets), False
+    return "TODO: backend did not return a full description.", True
+
+
+def _work_mode_from_evidence(evidence: dict[str, Any]) -> tuple[str, bool]:
+    location = (evidence.get("location") or "").strip().lower()
+    location_scope = (evidence.get("location_scope") or "").strip().lower()
+    if "remote" in location or location_scope.startswith("remote"):
+        return "remote", False
+    return "TODO work mode", True
+
+
+def build_job_view_model(lead: dict[str, Any]) -> dict[str, Any]:
+    evidence = lead.get("evidence_json") or {}
+    score_payload = lead.get("score_breakdown_json") or {}
+    description, description_missing = _description_from_evidence(evidence)
+    full_description, full_description_missing = _full_description_from_evidence(evidence)
+    work_mode, work_mode_missing = _work_mode_from_evidence(evidence)
+    source = lead.get("source_lineage") or lead.get("source_platform") or lead.get("source_type")
+    state = "applied" if lead.get("applied") else "saved" if lead.get("saved") else "new"
+    tags = [
+        item
+        for item in [
+            lead.get("freshness_label"),
+            lead.get("qualification_fit_label"),
+            lead.get("confidence_label"),
+            source,
+        ]
+        if item
+    ][:4]
+    gaps: list[str] = []
+    if work_mode_missing:
+        gaps.append("work_mode")
+    if description_missing:
+        gaps.append("description")
+    if full_description_missing:
+        gaps.append("full_description")
+    if not evidence.get("location"):
+        gaps.append("location")
+    return {
+        "id": str(lead["id"]),
+        "lead_id": lead["id"],
+        "title": lead.get("primary_title") or "TODO title",
+        "company": lead.get("company_name") or "TODO company",
+        "location": evidence.get("location") or "TODO location",
+        "work_mode": work_mode,
+        "description": description,
+        "full_description": full_description,
+        "match_score_display": _match_score_display(score_payload),
+        "match_label": _match_label(score_payload, lead),
+        "explanation": (
+            (score_payload.get("explanation") or {}).get("headline")
+            or (score_payload.get("explanation") or {}).get("summary")
+            or lead.get("explanation")
+            or "TODO: backend did not return a recommendation explanation."
+        ),
+        "tags": tags,
+        "posted_date": lead.get("posted_at") or lead.get("surfaced_at") or "Unknown date",
+        "salary": evidence.get("salary") or None,
+        "source": source,
+        "state": state,
+        "why_this_job": (score_payload.get("explanation") or {}).get("summary") or lead.get("explanation"),
+        "what_you_are_missing": (
+            "Qualification fit is stretch." if lead.get("qualification_fit_label") == "stretch" else
+            "Qualification fit is unclear." if lead.get("qualification_fit_label") == "unclear" else
+            None
+        ),
+        "suggested_next_steps": score_payload.get("action_explanation") or "TODO: backend did not return suggested next steps.",
+        "url": lead.get("url"),
+        "backend_gaps": gaps,
+        "raw_lead": lead,
+    }
+
+
+def jobs_backend_gap_frame(jobs: list[dict[str, Any]]) -> pd.DataFrame:
+    rows: list[dict[str, Any]] = []
+    for job in jobs:
+        for gap in job.get("backend_gaps", []):
+            rows.append(
+                {
+                    "job_id": job["lead_id"],
+                    "title": job["title"],
+                    "company": job["company"],
+                    "missing_field": gap,
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def _parse_timestamp(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    try:
+        timestamp = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return timestamp if timestamp.tzinfo else timestamp.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def _filter_jobs(jobs: list[dict[str, Any]], filters: dict[str, Any]) -> list[dict[str, Any]]:
+    filtered = jobs
+    if filters["search"].strip():
+        term = filters["search"].strip().lower()
+        filtered = [
+            job for job in filtered
+            if term in (job.get("title") or "").lower() or term in (job.get("company") or "").lower()
+        ]
+    if filters["location"].strip():
+        location_term = filters["location"].strip().lower()
+        filtered = [job for job in filtered if location_term in (job.get("location") or "").lower()]
+    if filters["remote_only"]:
+        filtered = [job for job in filtered if job.get("work_mode") == "remote"]
+    if filters["sort_by"] == "Newest":
+        filtered = sorted(
+            filtered,
+            key=lambda job: _parse_timestamp(job["raw_lead"].get("posted_at") or job["raw_lead"].get("surfaced_at")) or datetime.min.replace(tzinfo=timezone.utc),
+            reverse=True,
+        )
+    else:
+        filtered = sorted(
+            filtered,
+            key=lambda job: float((job["raw_lead"].get("score_breakdown_json") or {}).get("final_score", 0.0) or 0.0),
+            reverse=True,
+        )
+    return filtered
+
+
+def render_job_detail_panel(
+    job: dict[str, Any],
+    *,
+    page_key: str,
+    on_close: Callable[[], None],
+    on_save: Callable[[], None],
+    on_apply: Callable[[], None],
+    on_dismiss: Callable[[], None],
+) -> None:
+    st.markdown("### Job detail")
+    st.markdown(f"**{job['title']}**")
+    st.caption(f"{job['company']} • {job['location']} • {job['work_mode']}")
+    stat_cols = st.columns(2)
+    stat_cols[0].metric("Match", job["match_score_display"])
+    stat_cols[1].metric("Label", job["match_label"])
+    action_cols = st.columns(4)
+    if action_cols[0].button("Close", key=f"close-detail-{page_key}-{job['id']}", use_container_width=True):
+        on_close()
+    if action_cols[1].button("Save", key=f"detail-save-{page_key}-{job['id']}", use_container_width=True, disabled=job.get("state") == "saved"):
+        on_save()
+    if action_cols[2].button("Apply", key=f"detail-apply-{page_key}-{job['id']}", use_container_width=True, disabled=job.get("state") == "applied"):
+        on_apply()
+    if action_cols[3].button("Dismiss", key=f"detail-dismiss-{page_key}-{job['id']}", use_container_width=True):
+        on_dismiss()
+    if job.get("url"):
+        st.link_button("Open source", job["url"], use_container_width=True)
+    st.markdown("#### Recommendation")
+    st.write(job["explanation"])
+    st.markdown("#### Why this job")
+    st.write(job.get("why_this_job") or "TODO: backend did not return a detailed rationale.")
+    st.markdown("#### What you are missing")
+    st.write(job.get("what_you_are_missing") or "No explicit gap recorded.")
+    st.markdown("#### Suggested next steps")
+    st.write(job.get("suggested_next_steps") or "TODO: backend did not return next steps.")
+    st.markdown("#### Full description")
+    st.write(job["full_description"])
+    if job.get("backend_gaps"):
+        st.warning("Backend/UI contract gaps for this card: " + ", ".join(job["backend_gaps"]))
+
+
+def render_jobs_screen(
+    *,
+    leads: list[dict[str, Any]],
+    page_key: str,
+    title: str,
+    empty_message: str,
+    last_updated: datetime | None,
+    send_feedback_fn: Callable[[int, str], None],
+) -> None:
+    jobs = [build_job_view_model(lead) for lead in leads]
+    filters = render_jobs_topbar(page_key=page_key, last_updated=last_updated)
+    if filters["refresh"]:
+        st.session_state[f"jobs-last-updated-{page_key}"] = datetime.now(timezone.utc)
+        st.rerun()
+
+    filtered_jobs = _filter_jobs(jobs, filters)
+    gap_frame = jobs_backend_gap_frame(filtered_jobs)
+    st.markdown(f"### {title}")
+    if not gap_frame.empty:
+        with st.expander("Backend/UI field gaps", expanded=False):
+            st.dataframe(gap_frame, use_container_width=True, hide_index=True)
+
+    selected_job_id = st.session_state.get(f"selected-job-{page_key}")
+    selected_job = next((job for job in filtered_jobs if job["id"] == selected_job_id), None)
+    list_col, detail_col = st.columns([1.65, 1], gap="large")
+
+    with list_col:
+        if not filtered_jobs:
+            st.info(empty_message)
+            return
+        for job in filtered_jobs:
+            render_job_card(
+                job,
+                page_key=page_key,
+                on_open=lambda job_id=job["id"]: st.session_state.__setitem__(f"selected-job-{page_key}", job_id),
+                on_save=lambda lead_id=job["lead_id"]: (send_feedback_fn(lead_id, "save"), st.rerun()),
+                on_apply=lambda lead_id=job["lead_id"]: (send_feedback_fn(lead_id, "applied"), st.rerun()),
+                on_dismiss=lambda lead_id=job["lead_id"]: (send_feedback_fn(lead_id, "dislike"), st.rerun()),
+            )
+
+    with detail_col:
+        if selected_job is None:
+            st.info("Select a job card and open details to see the right-hand panel.")
+        else:
+            render_job_detail_panel(
+                selected_job,
+                page_key=page_key,
+                on_close=lambda: (st.session_state.pop(f"selected-job-{page_key}", None), st.rerun()),
+                on_save=lambda lead_id=selected_job["lead_id"]: (send_feedback_fn(lead_id, "save"), st.rerun()),
+                on_apply=lambda lead_id=selected_job["lead_id"]: (send_feedback_fn(lead_id, "applied"), st.rerun()),
+                on_dismiss=lambda lead_id=selected_job["lead_id"]: (send_feedback_fn(lead_id, "dislike"), st.rerun()),
+            )
