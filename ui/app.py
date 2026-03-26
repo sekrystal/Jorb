@@ -63,6 +63,7 @@ FIT_ORDER = {"strong fit": 0, "adjacent": 1, "stretch": 2, "unclear": 3, "overqu
 CONFIDENCE_ORDER = {"high": 0, "medium": 1, "low": 2}
 STATUS_ORDER = {status: index for index, status in enumerate(APPLICATION_STATUSES)}
 OPERATOR_CONSOLE_STATE_KEY = "show_operator_console"
+ONBOARDING_DEFERRED_STATE_KEY = "onboarding_deferred"
 
 
 class TableFilters(dict):
@@ -165,6 +166,7 @@ def build_onboarding_state(
     profile: dict[str, Any],
     latest_resume_ingest: Optional[dict[str, Any]],
     draft_profile: Optional[dict[str, Any]],
+    onboarding_deferred: bool = False,
 ) -> dict[str, Any]:
     resume_complete = bool((latest_resume_ingest and latest_resume_ingest.get("candidate_profile")) or profile.get("raw_resume_text"))
     review_complete = draft_profile is not None or (resume_complete and latest_resume_ingest is None)
@@ -178,7 +180,9 @@ def build_onboarding_state(
             ]
         )
     )
-    if not resume_complete:
+    if not resume_complete and onboarding_deferred:
+        current_step = "discovery"
+    elif not resume_complete:
         current_step = "resume"
     elif latest_resume_ingest is not None and draft_profile is None:
         current_step = "review"
@@ -191,6 +195,7 @@ def build_onboarding_state(
         "review_complete": review_complete,
         "target_role_complete": target_role_complete,
         "current_step": current_step,
+        "onboarding_deferred": onboarding_deferred,
     }
 
 
@@ -1009,11 +1014,23 @@ def render_user_job_link_form() -> None:
 
 def render_profile_tab(profile: dict[str, Any], learning: dict[str, Any]) -> None:
     st.subheader("Onboarding")
-    st.caption("Move from resume upload to profile review, pick a target role, then continue into discovery.")
+    st.caption("Optional setup for the validation harness: add a resume, review the profile, and pick a target role when you need it.")
     latest_resume_ingest = st.session_state.get("latest_resume_ingest")
     draft_profile = st.session_state.get("onboarding_profile_draft")
-    onboarding_state = build_onboarding_state(profile, latest_resume_ingest, draft_profile)
+    onboarding_deferred = bool(st.session_state.get(ONBOARDING_DEFERRED_STATE_KEY, False))
+    onboarding_state = build_onboarding_state(profile, latest_resume_ingest, draft_profile, onboarding_deferred=onboarding_deferred)
     render_onboarding_progress(onboarding_state)
+
+    if onboarding_state["current_step"] == "discovery" and onboarding_state["onboarding_deferred"] and not onboarding_state["resume_complete"]:
+        st.info("Setup deferred. Use Jobs, Saved, or Applied to validate the real-job path first, then return here when you want to refine the profile.")
+        if st.button("Resume optional setup", use_container_width=True):
+            st.session_state[ONBOARDING_DEFERRED_STATE_KEY] = False
+            st.rerun()
+    elif not onboarding_state["resume_complete"]:
+        st.caption("Resume upload is optional in this temporary harness.")
+        if st.button("Skip setup for now", use_container_width=True):
+            st.session_state[ONBOARDING_DEFERRED_STATE_KEY] = True
+            st.rerun()
 
     st.markdown("#### Step 1: Upload resume")
     upload = st.file_uploader("Upload resume PDF, TXT, or MD", type=["pdf", "txt", "md"])
@@ -1038,6 +1055,7 @@ def render_profile_tab(profile: dict[str, Any], learning: dict[str, Any]) -> Non
                 "text_preview": preview["text_preview"],
                 "candidate_profile": response.get("candidate_profile", preview["candidate_profile"]),
             }
+            st.session_state[ONBOARDING_DEFERRED_STATE_KEY] = False
             st.session_state.pop("onboarding_profile_draft", None)
             st.rerun()
         except Exception as exc:
@@ -1094,6 +1112,7 @@ def render_profile_tab(profile: dict[str, Any], learning: dict[str, Any]) -> Non
             min_seniority = st.selectbox("Min seniority", bands, index=bands.index(min_seniority_value if min_seniority_value in bands else "mid"))
             max_seniority = st.selectbox("Max seniority", bands, index=bands.index(max_seniority_value if max_seniority_value in bands else "senior"))
             if st.form_submit_button("Continue to target role", use_container_width=True):
+                st.session_state[ONBOARDING_DEFERRED_STATE_KEY] = False
                 st.session_state["onboarding_profile_draft"] = build_profile_update_payload(
                     profile,
                     review_profile,
@@ -1135,6 +1154,7 @@ def render_profile_tab(profile: dict[str, Any], learning: dict[str, Any]) -> Non
                 payload = apply_target_role_selection(draft_profile, selected_target_role)
                 fetch_json("/candidate-profile", method="POST", payload=payload)
                 st.session_state["last_onboarding_target_role"] = selected_target_role
+                st.session_state[ONBOARDING_DEFERRED_STATE_KEY] = False
                 st.session_state.pop("latest_resume_ingest", None)
                 st.session_state.pop("onboarding_profile_draft", None)
                 st.rerun()

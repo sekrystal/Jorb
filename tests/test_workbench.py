@@ -746,6 +746,19 @@ def test_build_onboarding_state_requires_resume_before_review() -> None:
     assert state["current_step"] == "resume"
 
 
+def test_build_onboarding_state_allows_discovery_when_setup_is_deferred() -> None:
+    state = ui_app.build_onboarding_state(
+        profile={"raw_resume_text": "", "preferred_titles_json": []},
+        latest_resume_ingest=None,
+        draft_profile=None,
+        onboarding_deferred=True,
+    )
+
+    assert state["resume_complete"] is False
+    assert state["current_step"] == "discovery"
+    assert state["onboarding_deferred"] is True
+
+
 def test_build_onboarding_state_moves_from_review_to_target_role() -> None:
     latest_resume_ingest = {
         "candidate_profile": {
@@ -888,6 +901,49 @@ def test_build_profile_update_payload_preserves_extracted_resume_draft_fields() 
     assert payload["seniority_guess"] == "senior"
     assert payload["target_roles_json"] == ["chief of staff"]
     assert payload["work_mode_preference"] == "remote"
+
+
+def test_build_profile_update_payload_still_writes_structured_profile_without_resume_flow() -> None:
+    saved_profile = {
+        "profile_schema_version": "v1",
+        "name": "Saved Profile",
+        "raw_resume_text": "",
+        "extracted_summary_json": {"summary": "existing summary"},
+        "seniority_guess": "mid",
+        "target_roles_json": [],
+        "work_mode_preference": "unspecified",
+    }
+
+    payload = ui_app.build_profile_update_payload(
+        saved_profile,
+        saved_profile,
+        {
+            "name": "Edited Candidate",
+            "preferred_titles": "chief of staff, operator",
+            "adjacent_titles": "program manager",
+            "excluded_titles": "intern",
+            "preferred_domains": "ai",
+            "excluded_companies": "BigCo",
+            "preferred_locations": "remote",
+            "confirmed_skills": "sql, stakeholder management",
+            "competencies": "process design, operator judgment",
+            "explicit_preferences": "hands-on teams, customer-facing work",
+            "stage_preferences": "series a",
+            "core_titles": "chief of staff",
+            "excluded_keywords": "clearance required",
+            "min_seniority_band": "mid",
+            "max_seniority_band": "staff",
+            "stretch_role_families": "operations",
+            "minimum_fit_threshold": 3.3,
+        },
+    )
+
+    assert payload["raw_resume_text"] == ""
+    assert payload["preferred_titles_json"] == ["chief of staff", "operator"]
+    assert payload["core_titles_json"] == ["chief of staff"]
+    assert payload["preferred_domains_json"] == ["ai"]
+    assert payload["preferred_locations_json"] == ["remote"]
+    assert payload["minimum_fit_threshold"] == 3.3
 
 
 def test_lead_frame_prefers_source_lineage_for_provenance() -> None:

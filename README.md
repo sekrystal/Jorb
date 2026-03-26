@@ -547,6 +547,7 @@ Production JS shell notes:
 - profile UX: onboarding and `Profile` both edit lightweight search preferences for target roles, geography, and work mode without exposing operator-heavy internals
 - Streamlit remains the temporary validation harness at `http://127.0.0.1:8500`
 - the default Streamlit shell is jobs-first, with `Jobs`, `Saved`, `Applied`, and `Profile` kept primary
+- the Streamlit `Profile` setup is optional, so operators can defer resume or LinkedIn-adjacent imports while validating the real-job path first
 - operator-heavy surfaces move behind the separate `Open operator console` path instead of sharing the default user-facing shell
 - the JS shell intentionally does not expose `source matrix`, `discovery internals`, `learning`, `autonomy ops`, `agent activity`, `investigations`, `diagnostics`, or `operator controls` as product entry points
 
