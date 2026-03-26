@@ -16,6 +16,7 @@ from services.discovery_agents import planner_agent
 from services.pipeline import ingest_user_job_link, recommendation_component_value, recommendation_score_value, run_scout_agent
 from services.profile import ingest_resume, update_candidate_profile
 from services.sync import sync_all
+from services.explain import build_explanation
 
 
 def test_run_scout_agent_adds_demo_batch_and_logs_activity() -> None:
@@ -240,6 +241,21 @@ def test_lead_response_normalizes_signal_only_roles_to_seek_referral_guidance() 
     assert score_payload["action_label"] == "Seek referral"
     assert "novelty +0.70" in score_payload["action_explanation"]
     assert "source quality +0.40" in score_payload["action_explanation"]
+
+
+def test_build_explanation_includes_role_and_location_fragments() -> None:
+    explanation = build_explanation(
+        lead_type="listing",
+        matched_profile_fields=["core title", "preferred geography"],
+        feedback_notes=[],
+        freshness_label="fresh",
+        confidence_label="high",
+        role_match_explanation="Role match: title aligns with a core role from the profile.",
+        location_fit_explanation="Location fit: location 'San Francisco, CA' matches preferred geography 'san francisco' (positive signal).",
+    )
+
+    assert "Role match:" in explanation
+    assert "Location fit:" in explanation
 
 
 def test_recommendation_score_helpers_support_legacy_and_structured_payloads() -> None:

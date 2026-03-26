@@ -80,6 +80,7 @@ def test_feedback_boosts_are_capped_and_do_not_exceed_total_positive_limit() -> 
         + breakdown["feedback_domain_boost"]
     )
     assert round(total_positive_feedback, 2) == 1.5
+    assert isinstance(breakdown["final_score"], float)
 
 
 def test_strong_rank_threshold_now_requires_more_than_73() -> None:
@@ -99,6 +100,7 @@ def test_strong_rank_threshold_now_requires_more_than_73() -> None:
         feedback_learning={},
     )
     assert breakdown["composite"] == 7.0
+    assert breakdown["final_score"] == 7.0
     assert breakdown["rank_label"] == "medium"
 
 
@@ -145,9 +147,12 @@ def test_explicit_target_role_changes_title_fit_and_score() -> None:
     )
 
     assert targeted["title_fit_label"] == "target role match"
-    assert targeted["composite"] > baseline["composite"]
+    assert targeted["final_score"] > baseline["final_score"]
     assert "target role" in targeted["matched_profile_fields"]
     assert targeted["search_intent"]["target_roles"] == ["deployment strategist"]
+    assert "Role match:" in targeted["role_match_explanation"]
+    assert "explicit target role" in targeted["role_match_explanation"]
+    assert "Location fit:" in targeted["location_fit_explanation"]
 
 
 def test_explicit_work_mode_preference_penalizes_mismatch() -> None:
@@ -196,3 +201,5 @@ def test_explicit_work_mode_preference_penalizes_mismatch() -> None:
     assert onsite["work_mode_match"] == "onsite"
     assert remote["work_mode_match"] == "remote"
     assert onsite["search_intent"]["work_mode_preference"] == "onsite"
+    assert "matches preferred geography" in onsite["location_fit_explanation"]
+    assert "conflicts with the onsite preference" in remote["location_fit_explanation"]

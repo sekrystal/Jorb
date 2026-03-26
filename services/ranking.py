@@ -23,6 +23,63 @@ WORK_MODE_KEYWORDS = {
 }
 
 
+def _first_case_insensitive_match(value: Optional[str], choices: list[str]) -> Optional[str]:
+    if not value:
+        return None
+    lowered = value.lower()
+    for choice in choices:
+        if choice.lower() in lowered:
+            return choice
+    return None
+
+
+def build_role_match_explanation(title_fit_label: str, matched_profile_fields: list[str], search_intent, title: str) -> str:
+    if title_fit_label == "target role match":
+        target_role = next((role for role in search_intent.target_roles if role.lower() in title.lower()), title)
+        return f"Role match: title matches explicit target role '{target_role}'."
+    if title_fit_label == "core match":
+        return "Role match: title aligns with a core role from the profile."
+    if title_fit_label == "adjacent match":
+        return "Role match: title is adjacent to the candidate's preferred scope."
+    if title_fit_label == "unexpected but plausible":
+        return "Role match: scope keywords in the description make the role plausibly relevant."
+    if "excluded title" in matched_profile_fields:
+        return "Role match: title conflicts with an excluded role from the profile."
+    return "Role match: title is only a weak match for the candidate's target scope."
+
+
+def build_location_fit_explanation(
+    location: Optional[str],
+    preferred_locations: list[str],
+    work_mode_preference: str,
+    lead_work_mode: str,
+    search_intent,
+    location_fit: float,
+) -> str:
+    matched_location = _first_case_insensitive_match(location, preferred_locations)
+    parts: list[str] = []
+
+    if matched_location:
+        parts.append(f"location '{location}' matches preferred geography '{matched_location}'")
+    elif location:
+        parts.append(f"location '{location}' does not match preferred geographies")
+    else:
+        parts.append("location is unspecified")
+
+    if work_mode_preference != "unspecified":
+        if lead_work_mode == work_mode_preference:
+            parts.append(f"work mode matches the {work_mode_preference} preference")
+        elif lead_work_mode == "unspecified":
+            parts.append(f"work mode could not be confirmed against the {work_mode_preference} preference")
+        elif search_intent.explicit_work_mode:
+            parts.append(f"work mode conflicts with the {work_mode_preference} preference")
+        else:
+            parts.append(f"work mode differs from the inferred {work_mode_preference} preference")
+
+    direction = "positive" if location_fit > 0 else "neutral" if location_fit == 0 else "negative"
+    return f"Location fit: {'; '.join(parts)} ({direction} signal)."
+
+
 def infer_role_family(title: str, description_text: str = "") -> str:
     lowered = f"{title} {description_text}".lower()
     for family, keywords in ROLE_FAMILY_KEYWORDS.items():
@@ -238,8 +295,18 @@ def score_lead(
     ]
     confidence_total = sum(confidence_components)
     confidence_label = "high" if confidence_total >= 2.6 else "medium" if confidence_total >= 1.4 else "low"
+    role_match_explanation = build_role_match_explanation(title_fit_label, matched_profile_fields, search_intent, title)
+    location_fit_explanation = build_location_fit_explanation(
+        location=location,
+        preferred_locations=preferred_locations,
+        work_mode_preference=work_mode_preference,
+        lead_work_mode=lead_work_mode,
+        search_intent=search_intent,
+        location_fit=location_fit,
+    )
 
     return {
+        "final_score": composite,
         "composite": composite,
         "freshness": round(freshness_score, 2),
         "title_fit": round(title_fit_score, 2),
@@ -261,6 +328,8 @@ def score_lead(
         "title_fit_label": title_fit_label,
         "qualification_fit_label": qualification_fit_label,
         "matched_profile_fields": list(dict.fromkeys(matched_profile_fields)),
+        "role_match_explanation": role_match_explanation,
+        "location_fit_explanation": location_fit_explanation,
         "role_family": role_family,
         "search_intent": search_intent.model_dump(),
         "target_roles": search_intent.target_roles,
