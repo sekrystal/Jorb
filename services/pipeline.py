@@ -14,7 +14,7 @@ from core.schemas import AgentRunResponse, ListingRecord, SignalRecord
 from connectors.search_web import classify_temporal_intelligence
 from services.activity import append_lead_agent_trace, log_agent_activity, log_agent_run
 from services.digests import record_run_digest
-from services.freshness import classify_freshness_label, validate_listing
+from services.freshness import classify_freshness_label, dedupe_listing_records, verify_listing
 from services.governance import evaluate_learning_governance
 from services.learning import add_watchlist_item, generate_follow_up_tasks
 from services.profile import get_candidate_profile
@@ -243,22 +243,28 @@ def _insert_demo_batch(session: Session) -> tuple[int, int, list[Listing], list[
     if not next_batch:
         return 0, 0, [], []
 
+    verified_records = []
+    for item in next_batch["listings"]:
+        verified = verify_listing(
+            ListingRecord(
+                company_name=item["company_name"],
+                company_domain=item.get("company_domain"),
+                careers_url=item.get("careers_url"),
+                title=item["title"],
+                location=item.get("location"),
+                url=item["url"],
+                source_type=item["source_type"],
+                posted_at=_coerce_datetime(item.get("posted_at")),
+                description_text=item.get("description_text"),
+                metadata_json=item.get("metadata_json", {}),
+            )
+        )
+        if verified is not None:
+            verified_records.append(verified)
+
     listing_count = 0
     inserted_listings: list[Listing] = []
-    for item in next_batch["listings"]:
-        record = ListingRecord(
-            company_name=item["company_name"],
-            company_domain=item.get("company_domain"),
-            careers_url=item.get("careers_url"),
-            title=item["title"],
-            location=item.get("location"),
-            url=item["url"],
-            source_type=item["source_type"],
-            posted_at=_coerce_datetime(item.get("posted_at")),
-            description_text=item.get("description_text"),
-            metadata_json=item.get("metadata_json", {}),
-        )
-        record = validate_listing(record)
+    for record in dedupe_listing_records(verified_records):
         company = get_or_create_company(
             session,
             name=record.company_name,
@@ -316,7 +322,7 @@ def ingest_user_job_link(
 
     source_type = _source_type_for_user_url(cleaned_url)
     source_lineage = _source_lineage_for_user_submission(source_type)
-    record = validate_listing(
+    record = verify_listing(
         ListingRecord(
             company_name=cleaned_company,
             title=cleaned_title,
@@ -335,6 +341,8 @@ def ingest_user_job_link(
             },
         )
     )
+    if record is None:
+        raise ValueError("job_url did not pass listing verification")
     company = get_or_create_company(session, name=record.company_name, ats_provider=record.source_type)
     listing, listing_created = _upsert_listing(session, record, company.id)
     profile = get_candidate_profile(session)

@@ -55,7 +55,12 @@ from services.discovery_agents import (
 )
 from services.explain import build_explanation
 from services.extract_signal import extract_many
-from services.freshness import classify_freshness_label, has_expired_pattern, validate_listing
+from services.freshness import (
+    classify_freshness_label,
+    dedupe_listing_records,
+    has_expired_pattern,
+    verify_listing,
+)
 from services.investigations import mark_investigation_attempt, upsert_investigation
 from services.learning import generate_follow_up_tasks, increment_query_stat
 from services.location_policy import classify_location_scope, is_location_allowed_for_profile
@@ -212,6 +217,27 @@ def _upsert_signal(session: Session, record: SignalRecord) -> Signal:
 
 def _upsert_listing(session: Session, record: ListingRecord, company_id: Optional[int]) -> tuple[Listing, bool]:
     existing = session.scalar(select(Listing).where(Listing.url == record.url))
+    record_metadata = dict(record.metadata_json or {})
+    record_canonical_url = str(record_metadata.get("canonical_url") or record.url or "").strip().lower()
+    record_internal_job_id = str(record_metadata.get("internal_job_id") or "").strip().lower()
+    if existing is None and (record_canonical_url or record_internal_job_id):
+        candidates = session.scalars(
+            select(Listing).where(
+                Listing.source_type == record.source_type,
+                Listing.company_name == record.company_name,
+                Listing.title == record.title,
+            )
+        ).all()
+        for candidate in candidates:
+            candidate_metadata = dict(candidate.metadata_json or {})
+            candidate_canonical_url = str(candidate_metadata.get("canonical_url") or candidate.url or "").strip().lower()
+            candidate_internal_job_id = str(candidate_metadata.get("internal_job_id") or "").strip().lower()
+            if record_internal_job_id and candidate_internal_job_id == record_internal_job_id:
+                existing = candidate
+                break
+            if record_canonical_url and candidate_canonical_url == record_canonical_url:
+                existing = candidate
+                break
     payload = record.model_dump(exclude={"canonical_job"})
     payload["company_id"] = company_id
     metadata = dict(payload.get("metadata_json") or {})
@@ -1583,7 +1609,7 @@ def sync_all(
         )
 
     greenhouse_normalized = [normalize_greenhouse_job(job) for job in greenhouse_jobs]
-    greenhouse_verified = [validate_listing(record) for record in greenhouse_normalized if _verify_listing_record(record)]
+    greenhouse_verified = [record for record in (verify_listing(record) for record in greenhouse_normalized if _verify_listing_record(record)) if record is not None]
     cycle_metrics["agent_discovered_listings_count"] += sum(
         1
         for record in greenhouse_normalized
@@ -1606,7 +1632,7 @@ def sync_all(
     )
 
     ashby_normalized = [normalize_ashby_job(job, job.get("companyName")) for job in ashby_jobs]
-    ashby_verified = [validate_listing(record) for record in ashby_normalized if _verify_listing_record(record)]
+    ashby_verified = [record for record in (verify_listing(record) for record in ashby_normalized if _verify_listing_record(record)) if record is not None]
     cycle_metrics["agent_discovered_listings_count"] += sum(
         1
         for record in ashby_normalized
@@ -1629,7 +1655,7 @@ def sync_all(
     )
 
     yc_jobs_normalized = [normalize_yc_job(job) for job in yc_jobs]
-    yc_jobs_verified = [validate_listing(record) for record in yc_jobs_normalized if _verify_listing_record(record)]
+    yc_jobs_verified = [record for record in (verify_listing(record) for record in yc_jobs_normalized if _verify_listing_record(record)) if record is not None]
     cycle_metrics["agent_discovered_listings_count"] += sum(
         1
         for record in yc_jobs_normalized
@@ -1683,6 +1709,7 @@ def sync_all(
     listing_records = list(greenhouse_verified)
     listing_records.extend(ashby_verified)
     listing_records.extend(yc_jobs_verified)
+    listing_records = dedupe_listing_records(listing_records)
 
     listing_objects: list[Listing] = []
     for record in listing_records:

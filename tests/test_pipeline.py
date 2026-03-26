@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -378,9 +379,16 @@ def test_ingest_user_job_link_routes_manual_submission_through_listing_pipeline(
     assert lead.last_agent_action == "Scout: ingested user-submitted link"
     assert lead.score_breakdown_json["source_quality"] == 1.2
     assert "Freshness logic:" in (lead.explanation or "")
+    assert (listing.metadata_json or {})["canonical_url"] == "https://job-boards.greenhouse.io/ramp/jobs/9999"
+    assert (listing.metadata_json or {})["verification"] == {
+        "canonical_url": "https://job-boards.greenhouse.io/ramp/jobs/9999",
+        "freshness_label": "fresh",
+        "listing_status": "active",
+        "dead_link_detected": False,
+    }
     assert (listing.metadata_json or {})["canonical_job"] == {
         "schema_version": "v1",
-        "url": "https://boards.greenhouse.io/ramp/jobs/9999",
+        "url": "https://job-boards.greenhouse.io/ramp/jobs/9999",
         "company": "Ramp",
         "title": "Strategic Programs Lead",
         "location": "New York, NY",
@@ -419,6 +427,100 @@ def test_ingest_user_job_link_marks_yc_jobs_submission_with_source_lineage() -> 
     assert (listing.metadata_json or {})["source_lineage"] == "yc_jobs+user_submitted"
     assert (lead.evidence_json or {})["source_lineage"] == "yc_jobs+user_submitted"
     assert lead.score_breakdown_json["source_quality"] == 0.9
+
+
+def test_ingest_user_job_link_canonicalizes_and_dedupes_manual_greenhouse_variants() -> None:
+    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine, expire_on_commit=False)()
+
+    ingest_resume(
+        session,
+        filename="resume.txt",
+        raw_text="Operator with chief of staff and strategic programs experience in AI companies.",
+    )
+
+    first = ingest_user_job_link(
+        session,
+        job_url="https://boards.greenhouse.io/ramp/jobs/9999?gh_jid=9999",
+        company_name="Ramp",
+        title="Strategic Programs Lead",
+        location="New York, NY",
+        description_text="Lead strategic programs, executive reporting, and operating cadences.",
+        posted_at=datetime.now(timezone.utc),
+    )
+    second = ingest_user_job_link(
+        session,
+        job_url="https://job-boards.greenhouse.io/ramp/jobs/9999/",
+        company_name="Ramp",
+        title="Strategic Programs Lead",
+        location="New York, NY",
+        description_text="Lead strategic programs, executive reporting, and operating cadences.",
+        posted_at=datetime.now(timezone.utc),
+    )
+    session.commit()
+
+    assert first["listing_id"] == second["listing_id"]
+    assert first["lead_id"] == second["lead_id"]
+    assert session.query(Listing).count() == 1
+    assert session.query(Lead).count() == 1
+
+
+def test_ingest_user_job_link_rejects_dead_links_during_verification() -> None:
+    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine, expire_on_commit=False)()
+
+    ingest_resume(
+        session,
+        filename="resume.txt",
+        raw_text="Operator with chief of staff and strategic programs experience in AI companies.",
+    )
+
+    with pytest.raises(ValueError, match="listing verification"):
+        ingest_user_job_link(
+            session,
+            job_url="https://job-boards.greenhouse.io/ramp/jobs/9999",
+            company_name="Ramp",
+            title="Strategic Programs Lead",
+            location="New York, NY",
+            description_text="This position has been filled and is no longer accepting applications.",
+            posted_at=datetime.now(timezone.utc),
+        )
+
+    assert session.query(Listing).count() == 0
+    assert session.query(Lead).count() == 0
+
+
+def test_ingest_user_job_link_flags_stale_records_in_verification_metadata() -> None:
+    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine, expire_on_commit=False)()
+
+    ingest_resume(
+        session,
+        filename="resume.txt",
+        raw_text="Operator with chief of staff and strategic programs experience in AI companies.",
+    )
+
+    result = ingest_user_job_link(
+        session,
+        job_url="https://www.workatastartup.com/jobs/12345?ref=homepage",
+        company_name="Acme",
+        title="Founding Operations Lead",
+        location="San Francisco, CA",
+        description_text="Lead recruiting systems, founder operations, and executive cadence.",
+        posted_at=datetime(2026, 3, 1, tzinfo=timezone.utc),
+    )
+    session.commit()
+
+    listing = session.get(Listing, result["listing_id"])
+
+    assert listing is not None
+    assert listing.url == "https://www.workatastartup.com/jobs/12345"
+    assert listing.freshness_days is not None and listing.freshness_days >= 14
+    assert (listing.metadata_json or {})["verification"]["freshness_label"] == "stale"
+    assert listing.listing_status == "active"
 
 
 def test_sync_all_surfaces_yc_jobs_listing_from_search_discovery(monkeypatch) -> None:
