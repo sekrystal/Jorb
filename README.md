@@ -597,7 +597,7 @@ pytest
 - live X ingestion is still intentionally limited
 - PDF extraction depends on text being extractable from the source PDF
 - Streamlit provides a practical workbench, not a full spreadsheet engine
-- the production JS shell is currently a skeletal frame, not yet full Figma fidelity
+- the production JS shell now carries the jobs-first screen, while operator-heavy workflows still remain in Streamlit
 - scheduled autonomy is local and sequential, not distributed infrastructure
 - unattended demo mode is reasonable for bounded local cycles, but still benefits from human review before long-running live use
 - live connectors remain the main barrier to true set-and-forget autonomy

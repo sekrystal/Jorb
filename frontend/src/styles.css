@@ -259,14 +259,21 @@ span {
 
 .jobs-page-summary {
   align-items: baseline;
-  display: flex;
+  display: grid;
   gap: 8px;
+  justify-items: end;
+  text-align: right;
 }
 
 .jobs-page-summary strong {
   color: var(--brand);
   font-size: 2.2rem;
   line-height: 1;
+}
+
+.jobs-page-summary p {
+  margin: 0;
+  max-width: 280px;
 }
 
 .jobs-topbar {
@@ -332,7 +339,66 @@ span {
 }
 
 .jobs-list-column {
+  display: grid;
+  gap: 16px;
   min-width: 0;
+}
+
+.jobs-summary-grid {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.jobs-summary-card,
+.jobs-list-header {
+  backdrop-filter: blur(16px);
+  background: rgba(255, 252, 247, 0.72);
+  border: 1px solid var(--panel-border);
+  box-shadow: var(--panel-shadow);
+}
+
+.jobs-summary-card {
+  border-radius: 24px;
+  display: grid;
+  gap: 6px;
+  padding: 18px;
+}
+
+.jobs-summary-card strong,
+.jobs-list-header h3,
+.jobs-list-count {
+  color: var(--brand);
+  font-family: "Iowan Old Style", "Palatino Linotype", serif;
+}
+
+.jobs-summary-card strong {
+  font-size: 2rem;
+  line-height: 1;
+}
+
+.jobs-summary-card p,
+.jobs-list-header p {
+  margin: 0;
+}
+
+.jobs-list-header {
+  align-items: center;
+  border-radius: 24px;
+  display: flex;
+  gap: 16px;
+  justify-content: space-between;
+  padding: 18px 20px;
+}
+
+.jobs-list-header-meta {
+  display: grid;
+  gap: 8px;
+  justify-items: end;
+}
+
+.jobs-list-count {
+  font-size: 1.25rem;
 }
 
 .jobs-list {
@@ -519,6 +585,11 @@ span {
   gap: 14px;
 }
 
+.job-detail-summary-copy {
+  display: grid;
+  gap: 10px;
+}
+
 .detail-metadata-grid,
 .profile-grid,
 .callout-grid {
@@ -561,6 +632,11 @@ span {
 .detail-callout.is-green {
   background: rgba(65, 127, 83, 0.08);
   border: 1px solid rgba(65, 127, 83, 0.14);
+}
+
+.detail-callout.is-neutral {
+  background: rgba(18, 32, 51, 0.05);
+  border: 1px solid rgba(18, 32, 51, 0.08);
 }
 
 .detail-description {
@@ -656,6 +732,10 @@ td {
 }
 
 @media (max-width: 1180px) {
+  .jobs-summary-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .jobs-topbar {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -690,8 +770,13 @@ td {
   .profile-grid,
   .callout-grid,
   .detail-metadata-grid,
-  .jobs-page-header {
+  .jobs-page-header,
+  .jobs-list-header {
     display: grid;
+    grid-template-columns: 1fr;
+  }
+
+  .jobs-summary-grid {
     grid-template-columns: 1fr;
   }
 
@@ -708,6 +793,12 @@ td {
   .job-detail-summary {
     align-items: start;
     flex-direction: column;
+  }
+
+  .jobs-page-summary,
+  .jobs-list-header-meta {
+    justify-items: start;
+    text-align: left;
   }
 
   .score-tile,

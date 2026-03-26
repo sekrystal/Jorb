@@ -104,6 +104,25 @@ function relativeTimeLabel(value?: string | null) {
   return `${diffDays} day${diffDays === 1 ? "" : "s"} ago`;
 }
 
+function relativeDayBucket(value?: string | null) {
+  if (!value) {
+    return "unknown";
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "unknown";
+  }
+  const diffMs = Date.now() - date.getTime();
+  const diffDays = Math.floor(diffMs / 86400000);
+  if (diffDays <= 0) {
+    return "today";
+  }
+  if (diffDays === 1) {
+    return "yesterday";
+  }
+  return "earlier";
+}
+
 function inferLocation(lead: Lead) {
   const location = lead.evidence_json?.location;
   return typeof location === "string" && location.trim() ? location.trim() : "Location not provided";
@@ -235,6 +254,77 @@ function sortJobs(items: JobViewModel[], sortBy: SortMode) {
   return [...items].sort((left, right) => Number(right.matchScore) - Number(left.matchScore));
 }
 
+function JobsListSummary({ jobs }: { jobs: JobViewModel[] }) {
+  const remoteCount = jobs.filter((job) => job.workMode === "remote").length;
+  const todayCount = jobs.filter((job) => relativeDayBucket(job.rawLead.posted_at || job.rawLead.surfaced_at) === "today").length;
+  const strongCount = jobs.filter((job) => job.matchLabel === "Strong Match").length;
+  const uniqueSources = new Set(jobs.map((job) => job.sourceProvenance || job.source)).size;
+
+  return (
+    <section className="jobs-summary-grid" aria-label="Jobs summary">
+      <article className="jobs-summary-card">
+        <span className="detail-label">Today</span>
+        <strong>{todayCount}</strong>
+        <p>Fresh opportunities surfaced in the current shortlist.</p>
+      </article>
+      <article className="jobs-summary-card">
+        <span className="detail-label">Remote</span>
+        <strong>{remoteCount}</strong>
+        <p>Roles marked remote in listing evidence or normalized location.</p>
+      </article>
+      <article className="jobs-summary-card">
+        <span className="detail-label">Strong Match</span>
+        <strong>{strongCount}</strong>
+        <p>Roles currently sitting in the strongest recommendation band.</p>
+      </article>
+      <article className="jobs-summary-card">
+        <span className="detail-label">Sources</span>
+        <strong>{uniqueSources}</strong>
+        <p>Distinct source provenance lines represented in this shortlist.</p>
+      </article>
+    </section>
+  );
+}
+
+function JobsListHeader({
+  filteredJobs,
+  searchQuery,
+  remoteOnly,
+  sortBy,
+}: {
+  filteredJobs: JobViewModel[];
+  searchQuery: string;
+  remoteOnly: boolean;
+  sortBy: SortMode;
+}) {
+  const activeFilters = [
+    searchQuery.trim() ? `Search: ${searchQuery.trim()}` : null,
+    remoteOnly ? "Remote only" : null,
+    sortBy === "newest" ? "Sorted: Newest" : "Sorted: Best Match",
+  ].filter((item): item is string => Boolean(item));
+
+  return (
+    <div className="jobs-list-header">
+      <div>
+        <p className="eyebrow">Shortlist</p>
+        <h3>Browse surfaced jobs</h3>
+      </div>
+      <div className="jobs-list-header-meta">
+        <span className="jobs-list-count">
+          {filteredJobs.length} {filteredJobs.length === 1 ? "role" : "roles"}
+        </span>
+        <div className="tag-row">
+          {activeFilters.map((filter) => (
+            <span className="tag-pill" key={filter}>
+              {filter}
+            </span>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function JobCard({
   job,
   selected,
@@ -364,7 +454,16 @@ function DetailPanel({
             <strong>{job.matchScore}</strong>
             <span>{job.matchLabel}</span>
           </div>
-          <p>{job.explanation}</p>
+          <div className="job-detail-summary-copy">
+            <p>{job.explanation}</p>
+            <div className="tag-row">
+              {job.tags.map((tag) => (
+                <span className="tag-pill" key={`${job.id}-detail-${tag}`}>
+                  {tag}
+                </span>
+              ))}
+            </div>
+          </div>
         </section>
         <section className="detail-metadata-grid">
           <article>
@@ -426,6 +525,10 @@ function DetailPanel({
           {job.fullDescription.split("\n").map((paragraph, index) => (
             <p key={`${job.id}-paragraph-${index}`}>{paragraph}</p>
           ))}
+        </section>
+        <section className="detail-callout is-neutral">
+          <span className="detail-label">Current status</span>
+          <p>{job.currentStatus}</p>
         </section>
       </div>
     </aside>
@@ -557,8 +660,11 @@ function JobsWorkspace({ title, description, params }: LeadViewProps) {
           <h2>{description}</h2>
         </div>
         <div className="jobs-page-summary">
-          <strong>{filteredJobs.length}</strong>
-          <span>{filteredJobs.length === 1 ? "job" : "jobs"}</span>
+          <div>
+            <strong>{filteredJobs.length}</strong>
+            <span>{filteredJobs.length === 1 ? "job" : "jobs"}</span>
+          </div>
+          <p>Review the live shortlist first, then inspect one role in context without leaving the page.</p>
         </div>
       </div>
       <div className="jobs-topbar">
@@ -609,8 +715,16 @@ function JobsWorkspace({ title, description, params }: LeadViewProps) {
         </div>
       ) : null}
       {!loading && !error ? (
-        <div className={`jobs-workspace${selectedJob ? " has-detail" : ""}`}>
-          <div className="jobs-list-column">
+        <>
+          <JobsListSummary jobs={filteredJobs} />
+          <div className={`jobs-workspace${selectedJob ? " has-detail" : ""}`}>
+            <div className="jobs-list-column">
+              <JobsListHeader
+                filteredJobs={filteredJobs}
+                remoteOnly={remoteOnly}
+                searchQuery={searchQuery}
+                sortBy={sortBy}
+              />
             {filteredJobs.length ? (
               <div className="jobs-list">
                 {filteredJobs.map((job) => {
@@ -647,18 +761,19 @@ function JobsWorkspace({ title, description, params }: LeadViewProps) {
                 </button>
               </div>
             )}
+            </div>
+            {selectedJob ? (
+              <DetailPanel
+                applying={pendingAction?.leadId === selectedJob.id && pendingAction.action === "applied"}
+                job={selectedJob}
+                onApply={() => updateLeadStatus(selectedJob.id, "applied")}
+                onClose={() => setSelectedId(null)}
+                onSave={() => updateLeadStatus(selectedJob.id, "saved")}
+                saving={pendingAction?.leadId === selectedJob.id && pendingAction.action === "saved"}
+              />
+            ) : null}
           </div>
-          {selectedJob ? (
-            <DetailPanel
-              applying={pendingAction?.leadId === selectedJob.id && pendingAction.action === "applied"}
-              job={selectedJob}
-              onApply={() => updateLeadStatus(selectedJob.id, "applied")}
-              onClose={() => setSelectedId(null)}
-              onSave={() => updateLeadStatus(selectedJob.id, "saved")}
-              saving={pendingAction?.leadId === selectedJob.id && pendingAction.action === "saved"}
-            />
-          ) : null}
-        </div>
+        </>
       ) : null}
     </section>
   );
