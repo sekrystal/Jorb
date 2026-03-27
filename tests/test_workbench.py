@@ -266,10 +266,12 @@ def test_acceptance_docs_require_live_runtime_smoke_for_product_work() -> None:
     assert "./scripts/runtime_self_check.sh" in readme
     assert "Live runtime smoke proof is separate from local test success." in readme
     assert "API, worker, and internal Streamlit harness validation" in readme
+    assert "PRIMARY_UI_URL=http://127.0.0.1:5173 ./scripts/runtime_self_check.sh" in readme
     assert "must not be marked complete without it passing against a real running stack" in readme
     assert "Acceptance-Critical Runtime Validation" in operations
     assert "./scripts/runtime_self_check.sh" in operations
     assert "Do not treat pytest or preflight success as product proof." in operations
+    assert "PRIMARY_UI_URL=http://127.0.0.1:5173" in operations
     assert "Passing pytest and preflight without live runtime smoke evidence is not enough" in operations
 
 

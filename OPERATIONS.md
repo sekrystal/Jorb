@@ -58,10 +58,11 @@ pytest tests/test_production_runtime.py tests/test_workbench.py
 - API reachability on the core product endpoints
 - worker process presence plus `run_once` execution
 - internal Streamlit harness reachability for operator and validation workflows
+- primary JS shell reachability when the task changes the product-facing routes or UX; record this by setting `PRIMARY_UI_URL=http://127.0.0.1:5173`
 
 If the script fails, report that failure honestly instead of accepting the work on isolated test success alone.
 
-Record the runtime smoke output itself in the task notes or handoff. Passing pytest and preflight without live runtime smoke evidence is not enough for acceptance-critical product tickets, and separate manual validation is still required for the JS product shell when that UX changes.
+Record the runtime smoke output itself in the task notes or handoff. Passing pytest and preflight without live runtime smoke evidence is not enough for acceptance-critical product tickets. If the change touches the primary user path, do not accept the work without the `PRIMARY_UI_URL` proof or equivalent direct shell evidence, and separate manual validation is still required for the JS product shell when that UX changes.
 
 ## Disable All Autonomy
 

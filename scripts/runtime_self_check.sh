@@ -4,6 +4,7 @@ set -euo pipefail
 
 API_URL="${API_URL:-http://127.0.0.1:8000}"
 UI_URL="${UI_URL:-http://127.0.0.1:8500}"
+PRIMARY_UI_URL="${PRIMARY_UI_URL:-}"
 PROJECT_DIR="$(pwd)"
 
 print_header() {
@@ -100,6 +101,27 @@ require_ui() {
     || fail "primary UI response did not look like Opportunity Scout"
 }
 
+require_primary_product_shell() {
+  [ -n "$PRIMARY_UI_URL" ] || return 0
+
+  print_header "curl primary product shell"
+  local body
+  body="$(curl -fsS "$PRIMARY_UI_URL")" || fail "primary product shell check failed at ${PRIMARY_UI_URL}"
+  printf '%s\n' "$body" | head -n 20
+  printf '%s\n' "$body" | grep -Fq '<title>JORB</title>' \
+    || fail "primary product shell root response did not look like the JORB shell"
+  printf '%s\n' "$body" | grep -Fq '<div id="root"></div>' \
+    || fail "primary product shell root response did not include the app mount"
+  printf '%s\n' "$body" | grep -Fq '/src/main.tsx' \
+    || fail "primary product shell root response did not include the Vite entrypoint"
+
+  print_header "curl primary product path"
+  body="$(curl -fsS "${PRIMARY_UI_URL%/}/jobs")" || fail "primary product path check failed at ${PRIMARY_UI_URL%/}/jobs"
+  printf '%s\n' "$body" | head -n 20
+  printf '%s\n' "$body" | grep -Fq '<title>JORB</title>' \
+    || fail "primary product path response did not look like the JORB shell"
+}
+
 show_processes() {
   if command -v pgrep >/dev/null 2>&1; then
     pgrep -af 'uvicorn api.main:app|scripts/run_worker.py|streamlit run ui/app.py' || printf 'no matching processes found\n'
@@ -146,6 +168,7 @@ require_http_json "curl /discovery-status" "${API_URL}/discovery-status"
 require_http_post_json "curl POST /runtime-control action=run_once" "${API_URL}/runtime-control" '{"action":"run_once"}'
 require_http_json "curl /opportunities" "${API_URL}/opportunities?freshness_window_days=14"
 require_ui
+require_primary_product_shell
 
 print_header "recent logs"
 show_logs
@@ -153,4 +176,9 @@ show_logs
 print_header "runtime verdict"
 printf '%s\n' 'Live runtime smoke passed: API, worker, and primary UI path were directly reachable.'
 printf '%s\n' 'Acceptance-critical runtime proof recorded for /health, /autonomy-status, /runtime-control, /discovery-status, /opportunities, run_once worker execution, and the default Streamlit workbench.'
+if [ -n "$PRIMARY_UI_URL" ]; then
+  printf 'Primary product shell proof recorded for %s and %s/jobs.\n' "$PRIMARY_UI_URL" "${PRIMARY_UI_URL%/}"
+else
+  printf '%s\n' 'Primary product shell proof not recorded; set PRIMARY_UI_URL=http://127.0.0.1:5173 when acceptance-critical work changes the JS shell or primary user path.'
+fi
 printf '%s\n' 'Local tests and preflight checks are still not live product proof on their own.'

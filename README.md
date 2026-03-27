@@ -609,8 +609,9 @@ Minimum live smoke evidence for product-path acceptance:
 - API: `/health`, `/autonomy-status`, `/runtime-control`, `/discovery-status`, and `/opportunities` respond successfully
 - worker: a live `scripts/run_worker.py` process is running and `POST /runtime-control` with `{"action":"run_once"}` succeeds
 - internal harness reachability: the secondary Streamlit validation harness responds on `http://127.0.0.1:8500`
+- primary product shell when relevant: if the acceptance-critical change touches the JS shell or user-facing product path, also record direct shell proof with `PRIMARY_UI_URL=http://127.0.0.1:5173 ./scripts/runtime_self_check.sh`
 
-`./scripts/runtime_self_check.sh` is the minimum required evidence recorder for API, worker, and internal Streamlit harness validation. It does not replace manual product judgment, and it does not by itself prove the JS product shell, but acceptance-critical product work must not be marked complete without it passing against a real running stack.
+`./scripts/runtime_self_check.sh` is the minimum required evidence recorder for API, worker, and internal Streamlit harness validation. When `PRIMARY_UI_URL` is set, it also records primary JS shell reachability for `/` and `/jobs`. It does not replace manual product judgment, but acceptance-critical product work must not be marked complete without it passing against a real running stack and without the relevant live runtime proof for the changed product path.
 
 ## Employer Demo Flow
 

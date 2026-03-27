@@ -171,13 +171,18 @@ def test_runtime_self_check_requires_live_stack_evidence() -> None:
     script = Path("scripts/runtime_self_check.sh").read_text()
 
     assert 'UI_URL="${UI_URL:-http://127.0.0.1:8500}"' in script
+    assert 'PRIMARY_UI_URL="${PRIMARY_UI_URL:-}"' in script
     assert 'require_process "api" \'uvicorn api.main:app\'' in script
     assert 'require_process "worker" \'scripts/run_worker.py\'' in script
     assert 'require_process "ui" \'streamlit run ui/app.py\'' in script
     assert 'curl -fsS' in script
     assert 'curl /opportunities' in script
+    assert 'curl primary product shell' in script
+    assert 'curl primary product path' in script
+    assert 'PRIMARY_UI_URL=http://127.0.0.1:5173' in script
     assert "Live runtime smoke passed: API, worker, and primary UI path were directly reachable." in script
     assert "Acceptance-critical runtime proof recorded for /health, /autonomy-status, /runtime-control, /discovery-status, /opportunities, run_once worker execution, and the default Streamlit workbench." in script
+    assert "Primary product shell proof not recorded; set PRIMARY_UI_URL=http://127.0.0.1:5173 when acceptance-critical work changes the JS shell or primary user path." in script
     assert "Local tests and preflight checks are still not live product proof on their own." in script
 
 
