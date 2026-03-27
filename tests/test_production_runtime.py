@@ -171,6 +171,7 @@ def test_runtime_self_check_requires_live_stack_evidence() -> None:
     assert 'curl -fsS' in script
     assert 'curl /opportunities' in script
     assert "Live runtime smoke passed: API, worker, and primary UI path were directly reachable." in script
+    assert "Acceptance-critical runtime proof recorded for /health, /autonomy-status, /runtime-control, /discovery-status, /opportunities, run_once worker execution, and the default Streamlit workbench." in script
     assert "Local tests and preflight checks are still not live product proof on their own." in script
 
 

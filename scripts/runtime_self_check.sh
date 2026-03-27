@@ -152,4 +152,5 @@ show_logs
 
 print_header "runtime verdict"
 printf '%s\n' 'Live runtime smoke passed: API, worker, and primary UI path were directly reachable.'
+printf '%s\n' 'Acceptance-critical runtime proof recorded for /health, /autonomy-status, /runtime-control, /discovery-status, /opportunities, run_once worker execution, and the default Streamlit workbench.'
 printf '%s\n' 'Local tests and preflight checks are still not live product proof on their own.'

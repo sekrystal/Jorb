@@ -266,9 +266,11 @@ def test_acceptance_docs_require_live_runtime_smoke_for_product_work() -> None:
     assert "./scripts/runtime_self_check.sh" in readme
     assert "Live runtime smoke proof is separate from local test success." in readme
     assert "API, worker, and primary UI path" in readme
+    assert "must not be marked complete without it passing against a real running stack" in readme
     assert "Acceptance-Critical Runtime Validation" in operations
     assert "./scripts/runtime_self_check.sh" in operations
     assert "Do not treat pytest or preflight success as product proof." in operations
+    assert "Passing pytest and preflight without live runtime smoke evidence is not enough" in operations
 
 
 def test_discovery_source_matrix_frame_exposes_truth_columns() -> None:

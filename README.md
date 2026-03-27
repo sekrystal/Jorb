@@ -609,7 +609,7 @@ Minimum live smoke evidence for product-path acceptance:
 - worker: a live `scripts/run_worker.py` process is running and `POST /runtime-control` with `{"action":"run_once"}` succeeds
 - primary UI path: the default Streamlit workbench responds on `http://127.0.0.1:8500`
 
-`./scripts/runtime_self_check.sh` is the minimum required evidence recorder for API, worker, and primary UI path validation. It does not replace manual product judgment, but acceptance-critical product work should not be marked complete without it passing against a real running stack.
+`./scripts/runtime_self_check.sh` is the minimum required evidence recorder for API, worker, and primary UI path validation. It does not replace manual product judgment, but acceptance-critical product work must not be marked complete without it passing against a real running stack.
 
 ## Employer Demo Flow
 

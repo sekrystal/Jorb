@@ -61,6 +61,8 @@ pytest tests/test_production_runtime.py tests/test_workbench.py
 
 If the script fails, report that failure honestly instead of accepting the work on isolated test success alone.
 
+Record the runtime smoke output itself in the task notes or handoff. Passing pytest and preflight without live runtime smoke evidence is not enough for acceptance-critical product tickets.
+
 ## Disable All Autonomy
 
 Edit `/etc/opportunity-scout/opportunity-scout.env`:
