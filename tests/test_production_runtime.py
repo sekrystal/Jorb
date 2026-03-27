@@ -159,3 +159,24 @@ def test_frontend_shell_dev_wiring_targets_existing_fastapi_backend() -> None:
     assert '"/candidate-profile"' in api_client
     assert '"/applications/status"' in api_client
     assert "Streamlit remains the temporary validation harness" in readme
+
+
+def test_runtime_self_check_requires_live_stack_evidence() -> None:
+    script = Path("scripts/runtime_self_check.sh").read_text()
+
+    assert 'UI_URL="${UI_URL:-http://127.0.0.1:8500}"' in script
+    assert 'require_process "api" \'uvicorn api.main:app\'' in script
+    assert 'require_process "worker" \'scripts/run_worker.py\'' in script
+    assert 'require_process "ui" \'streamlit run ui/app.py\'' in script
+    assert 'curl -fsS' in script
+    assert 'curl /opportunities' in script
+    assert "Live runtime smoke passed: API, worker, and primary UI path were directly reachable." in script
+    assert "Local tests and preflight checks are still not live product proof on their own." in script
+
+
+def test_preflight_check_declares_it_is_not_live_runtime_proof() -> None:
+    script = Path("scripts/preflight_check.sh").read_text()
+
+    assert "This script proves local imports, DB init, and test coverage only." in script
+    assert "It is not live runtime proof." in script
+    assert "./scripts/runtime_self_check.sh" in script

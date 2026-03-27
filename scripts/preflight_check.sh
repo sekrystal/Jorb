@@ -92,3 +92,5 @@ echo "== pytest =="
 
 echo
 echo "Preflight checks passed."
+echo "This script proves local imports, DB init, and test coverage only."
+echo "It is not live runtime proof. For acceptance-critical product work, run ./scripts/runtime_self_check.sh against a running API, worker, and UI stack."

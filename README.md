@@ -591,6 +591,26 @@ Guardrails:
 pytest
 ```
 
+## Acceptance-Critical Validation
+
+Acceptance-critical product work now requires two distinct proof types:
+
+1. local verification:
+   - targeted `pytest`
+   - `./scripts/preflight_check.sh`
+2. live runtime smoke proof:
+   - `./scripts/runtime_self_check.sh` against a running local stack
+
+Live runtime smoke proof is separate from local test success.
+
+Minimum live smoke evidence for product-path acceptance:
+
+- API: `/health`, `/autonomy-status`, `/runtime-control`, `/discovery-status`, and `/opportunities` respond successfully
+- worker: a live `scripts/run_worker.py` process is running and `POST /runtime-control` with `{"action":"run_once"}` succeeds
+- primary UI path: the default Streamlit workbench responds on `http://127.0.0.1:8500`
+
+`./scripts/runtime_self_check.sh` is the minimum required evidence recorder for API, worker, and primary UI path validation. It does not replace manual product judgment, but acceptance-critical product work should not be marked complete without it passing against a real running stack.
+
 ## Employer Demo Flow
 
 1. Run `python scripts/reset_demo.py`.

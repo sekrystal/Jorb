@@ -41,6 +41,26 @@ If you also run the Vite-based JS shell locally, restart `npm run dev` after cha
 
 Both the API and the worker cache settings in-process, and the database engine is bound at process start. Env changes do not apply until restart.
 
+## Acceptance-Critical Runtime Validation
+
+Do not treat pytest or preflight success as product proof.
+
+For acceptance-critical product work, record both:
+
+```bash
+pytest tests/test_production_runtime.py tests/test_workbench.py
+./scripts/preflight_check.sh
+./scripts/runtime_self_check.sh
+```
+
+`./scripts/runtime_self_check.sh` must pass against a running local stack and is the minimum live smoke proof for:
+
+- API reachability on the core product endpoints
+- worker process presence plus `run_once` execution
+- primary UI path reachability on the Streamlit workbench
+
+If the script fails, report that failure honestly instead of accepting the work on isolated test success alone.
+
 ## Disable All Autonomy
 
 Edit `/etc/opportunity-scout/opportunity-scout.env`:

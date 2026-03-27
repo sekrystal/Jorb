@@ -1,12 +1,18 @@
 #!/usr/bin/env bash
 
-set -u
+set -euo pipefail
 
 API_URL="${API_URL:-http://127.0.0.1:8000}"
+UI_URL="${UI_URL:-http://127.0.0.1:8500}"
 PROJECT_DIR="$(pwd)"
 
 print_header() {
   printf '\n== %s ==\n' "$1"
+}
+
+fail() {
+  printf 'ERROR: %s\n' "$1" >&2
+  exit 1
 }
 
 safe_git() {
@@ -45,6 +51,55 @@ show_env_matches() {
   fi
 }
 
+require_process() {
+  local label="$1"
+  local pattern="$2"
+
+  if command -v pgrep >/dev/null 2>&1; then
+    pgrep -af "$pattern" >/tmp/opportunity-scout-process-check.$$ || true
+  else
+    ps aux | grep -E "$pattern" | grep -v grep >/tmp/opportunity-scout-process-check.$$ || true
+  fi
+
+  if [ ! -s /tmp/opportunity-scout-process-check.$$ ]; then
+    rm -f /tmp/opportunity-scout-process-check.$$
+    fail "missing required process: ${label} (${pattern})"
+  fi
+
+  cat /tmp/opportunity-scout-process-check.$$
+  rm -f /tmp/opportunity-scout-process-check.$$
+}
+
+require_http_json() {
+  local label="$1"
+  local url="$2"
+
+  print_header "$label"
+  local body
+  body="$(curl -fsS "$url")" || fail "${label} failed at ${url}"
+  printf '%s\n' "$body"
+}
+
+require_http_post_json() {
+  local label="$1"
+  local url="$2"
+  local payload="$3"
+
+  print_header "$label"
+  local body
+  body="$(curl -fsS -X POST "$url" -H 'Content-Type: application/json' -d "$payload")" || fail "${label} failed at ${url}"
+  printf '%s\n' "$body"
+}
+
+require_ui() {
+  print_header "curl primary UI"
+  local body
+  body="$(curl -fsS "$UI_URL")" || fail "primary UI check failed at ${UI_URL}"
+  printf '%s\n' "$body" | head -n 20
+  printf '%s\n' "$body" | grep -Eiq 'streamlit|Opportunity Scout|Jobs|Saved|Applied|Profile' \
+    || fail "primary UI response did not look like Opportunity Scout"
+}
+
 show_processes() {
   if command -v pgrep >/dev/null 2>&1; then
     pgrep -af 'uvicorn api.main:app|scripts/run_worker.py|streamlit run ui/app.py' || printf 'no matching processes found\n'
@@ -76,34 +131,25 @@ safe_git git status --short
 print_header "process list"
 show_processes
 
+print_header "required process proof"
+require_process "api" 'uvicorn api.main:app'
+require_process "worker" 'scripts/run_worker.py'
+require_process "ui" 'streamlit run ui/app.py'
+
 print_header "env flags"
 show_env_matches
 
-print_header "curl /autonomy-status"
-curl -s "${API_URL}/autonomy-status" || printf 'curl failed\n'
-printf '\n'
-
-print_header "curl /health"
-curl -s "${API_URL}/health" || printf 'curl failed\n'
-printf '\n'
-
-print_header "curl /runtime-control"
-curl -s "${API_URL}/runtime-control" || printf 'curl failed\n'
-printf '\n'
-
-print_header "curl /discovery-status"
-curl -s "${API_URL}/discovery-status" || printf 'curl failed\n'
-printf '\n'
-
-print_header "curl POST /runtime-control action=run_once"
-curl -s -X POST "${API_URL}/runtime-control" \
-  -H 'Content-Type: application/json' \
-  -d '{"action":"run_once"}' || printf 'curl failed\n'
-printf '\n'
-
-print_header "curl /opportunities"
-curl -s "${API_URL}/opportunities?freshness_window_days=14" || printf 'curl failed\n'
-printf '\n'
+require_http_json "curl /autonomy-status" "${API_URL}/autonomy-status"
+require_http_json "curl /health" "${API_URL}/health"
+require_http_json "curl /runtime-control" "${API_URL}/runtime-control"
+require_http_json "curl /discovery-status" "${API_URL}/discovery-status"
+require_http_post_json "curl POST /runtime-control action=run_once" "${API_URL}/runtime-control" '{"action":"run_once"}'
+require_http_json "curl /opportunities" "${API_URL}/opportunities?freshness_window_days=14"
+require_ui
 
 print_header "recent logs"
 show_logs
+
+print_header "runtime verdict"
+printf '%s\n' 'Live runtime smoke passed: API, worker, and primary UI path were directly reachable.'
+printf '%s\n' 'Local tests and preflight checks are still not live product proof on their own.'

@@ -258,6 +258,19 @@ def test_recommendation_action_summary_uses_action_label_and_explanation() -> No
     assert summary == "Seek referral: Seek referral because the source signal is still weak."
 
 
+def test_acceptance_docs_require_live_runtime_smoke_for_product_work() -> None:
+    readme = Path("README.md").read_text()
+    operations = Path("OPERATIONS.md").read_text()
+
+    assert "Acceptance-Critical Validation" in readme
+    assert "./scripts/runtime_self_check.sh" in readme
+    assert "Live runtime smoke proof is separate from local test success." in readme
+    assert "API, worker, and primary UI path" in readme
+    assert "Acceptance-Critical Runtime Validation" in operations
+    assert "./scripts/runtime_self_check.sh" in operations
+    assert "Do not treat pytest or preflight success as product proof." in operations
+
+
 def test_discovery_source_matrix_frame_exposes_truth_columns() -> None:
     frame = ui_app.discovery_source_matrix_frame(
         [
