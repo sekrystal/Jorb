@@ -66,6 +66,7 @@ def init_db() -> None:
         "watchlist_items": {"item_type", "value", "status", "decision_reason"},
         "follow_up_tasks": {"application_id", "task_type", "due_at"},
         "agent_runs": {"agent_name", "action", "status"},
+        "search_runs": {"source_key", "worker_name", "provider", "status", "query_count", "result_count"},
         "runtime_control": {
             "run_state",
             "worker_state",

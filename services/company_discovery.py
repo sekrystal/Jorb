@@ -14,6 +14,7 @@ from connectors.search_web import SearchDiscoveryResult
 from core.config import Settings, get_settings
 from core.models import AgentRun, Application, CompanyDiscovery, ConnectorHealth, Lead, Listing
 from core.schemas import CompanyDiscoveryRowResponse, DiscoverySourceMatrixRow, DiscoveryStatusResponse
+from services.search_runs import list_recent_search_runs
 from core.time import utcnow
 from services.connector_admin import connector_blocked_reason
 from services.ops import get_runtime_connector_set
@@ -1134,6 +1135,7 @@ def build_discovery_status(session: Session) -> DiscoveryStatusResponse:
 
     since = utcnow() - timedelta(hours=24)
     recent_runs = recent_discovery_agent_runs(session)
+    recent_search_runs = list_recent_search_runs(session)
     rows = session.scalars(
         select(CompanyDiscovery)
         .order_by(CompanyDiscovery.last_discovered_at.desc(), CompanyDiscovery.utility_score.desc())
@@ -1287,6 +1289,7 @@ def build_discovery_status(session: Session) -> DiscoveryStatusResponse:
         },
         cycle_metrics=cycle_metrics,
         recent_items=[_company_discovery_row_response(row) for row in rows],
+        recent_search_runs=recent_search_runs,
     )
 
 

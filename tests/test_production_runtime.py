@@ -8,7 +8,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from core.config import Settings
-from core.models import AgentRun, AlertEvent, Base, ConnectorHealth, RunDigest, SourceQuery, WatchlistItem
+from core.models import AgentRun, AlertEvent, Base, ConnectorHealth, RunDigest, SearchRun, SourceQuery, WatchlistItem
 from core.time import utcnow
 from services.alerts import evaluate_alerts
 from services.connectors_health import record_connector_failure, record_connector_success
@@ -77,6 +77,13 @@ def test_daily_caps_limit_generated_queries_and_watchlist_items() -> None:
     session.flush()
     assert can_create_generated_queries_today(session, settings, requested=3) == 0
     assert can_add_watchlist_items_today(session, settings, requested=3) == 0
+
+
+def test_runtime_schema_creates_search_runs_table() -> None:
+    session = build_session()
+    session.add(SearchRun(worker_name="search"))
+    session.flush()
+    assert session.query(SearchRun).count() == 1
 
 
 def test_alerts_record_greenhouse_incident_and_rate_limit() -> None:

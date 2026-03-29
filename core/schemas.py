@@ -869,6 +869,23 @@ class DiscoverySourceMatrixRow(BaseModel):
     summary: Optional[str] = None
 
 
+class SearchRunResponse(BaseModel):
+    id: int
+    source_key: str
+    worker_name: str
+    provider: str
+    status: str
+    live: bool = False
+    zero_yield: bool = False
+    query_count: int = 0
+    result_count: int = 0
+    queries: list[str] = Field(default_factory=list)
+    failure_classification: Optional[str] = None
+    error: Optional[str] = None
+    diagnostics_json: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime
+
+
 class DiscoveryStatusResponse(BaseModel):
     total_known_companies: int = 0
     discovered_last_24h: int = 0
@@ -889,6 +906,7 @@ class DiscoveryStatusResponse(BaseModel):
     latest_openai_usage: dict[str, bool] = Field(default_factory=dict)
     cycle_metrics: dict[str, Any] = Field(default_factory=dict)
     recent_successful_expansions: list[dict[str, Any]] = Field(default_factory=list)
+    recent_search_runs: list[SearchRunResponse] = Field(default_factory=list)
 
 
 class DailyDigestResponse(BaseModel):

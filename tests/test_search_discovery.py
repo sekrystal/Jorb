@@ -3,6 +3,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import requests
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 
 from connectors.search_web import (
     DirectJobExtractionResult,
@@ -21,7 +23,16 @@ from connectors.search_web import (
     extract_ats_identifiers_from_html,
 )
 from core.config import Settings
+from core.models import Base, SearchRun
+from services.company_discovery import build_discovery_status
 from services.discovery_agents import ats_resolver_worker, parser_acquisition_worker, search_acquisition_worker
+from services.search_runs import record_search_run
+
+
+def build_session():
+    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    return sessionmaker(bind=engine, expire_on_commit=False)()
 
 
 def test_extract_ats_identifiers_from_careers_page_html() -> None:
@@ -416,6 +427,47 @@ def test_parser_acquisition_worker_extracts_job_links_from_careers_page(monkeypa
     assert execution.diagnostics["pages_crawled"] == 1
     assert execution.derived_results is not None
     assert execution.derived_results[0].url == "https://job-boards.greenhouse.io/example/jobs"
+
+
+def test_record_search_run_persists_observable_runtime_object() -> None:
+    session = build_session()
+    planner_plan = {
+        "queries": ['"chief of staff" startup careers'],
+        "structured_query_plans": {
+            "ats": [],
+            "search": [],
+            "weak_signal": [],
+        },
+    }
+
+    execution = search_acquisition_worker(
+        planner_plan,
+        settings=Settings(discovery_max_search_queries_per_cycle=4),
+        fetcher=lambda query_texts: (
+            [
+                SearchDiscoveryResult(
+                    query_text=query_texts[0],
+                    title="Example Careers",
+                    url="https://careers.example.com/jobs",
+                )
+            ],
+            True,
+        ),
+    )
+
+    row = record_search_run(session, execution, provider="duckduckgo_html")
+    status = build_discovery_status(session)
+
+    persisted = session.get(SearchRun, row.id)
+    assert persisted is not None
+    assert persisted.worker_name == "search"
+    assert persisted.status == "results"
+    assert persisted.query_count == 1
+    assert persisted.result_count == 1
+    assert persisted.queries_json == ['"chief of staff" startup careers']
+    assert status.recent_search_runs[0].id == row.id
+    assert status.recent_search_runs[0].worker_name == "search"
+    assert status.recent_search_runs[0].queries == ['"chief of staff" startup careers']
 
 
 def test_classify_query_family_captures_existing_query_mix() -> None:

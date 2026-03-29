@@ -274,6 +274,25 @@ class AgentRun(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
 
 
+class SearchRun(Base):
+    __tablename__ = "search_runs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    source_key: Mapped[str] = mapped_column(String(50), default="search_web", index=True)
+    worker_name: Mapped[str] = mapped_column(String(50), index=True)
+    provider: Mapped[str] = mapped_column(String(100), default="duckduckgo_html", index=True)
+    status: Mapped[str] = mapped_column(String(50), default="not_run", index=True)
+    live: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    zero_yield: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    query_count: Mapped[int] = mapped_column(Integer, default=0)
+    result_count: Mapped[int] = mapped_column(Integer, default=0)
+    queries_json: Mapped[list] = mapped_column(JSON, default=list)
+    failure_classification: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    diagnostics_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+
+
 class RuntimeControl(Base):
     __tablename__ = "runtime_control"
 

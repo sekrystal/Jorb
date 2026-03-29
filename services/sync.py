@@ -72,6 +72,7 @@ from services.profile import get_candidate_profile
 from services.query_learning import ensure_source_queries
 from services.ranking import infer_role_family, score_lead
 from services.resolve_company import get_or_create_company, queue_recheck, resolve_company_name
+from services.search_runs import record_search_run
 
 
 logger = get_logger(__name__)
@@ -1063,6 +1064,8 @@ def sync_all(
                 date_fields=[],
             )[:2],
         )
+        record_search_run(session, ats_execution)
+        record_search_run(session, search_execution)
         search_results = search_execution.results
         search_live = search_execution.live
         search_diagnostics = _search_fetch_diagnostics(search_connector, search_execution.query_texts)
