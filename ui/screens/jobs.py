@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from html import escape
 from typing import Any, Callable
 
 import pandas as pd
@@ -58,6 +59,50 @@ def build_search_state_view_model(search_run: dict[str, Any] | None) -> dict[str
             f"across {query_count} quer{'y' if query_count == 1 else 'ies'} at {created_label}."
         ),
     }
+
+
+def render_search_status_region(search_run: dict[str, Any] | None, *, visible_job_count: int) -> None:
+    search_state = build_search_state_view_model(search_run)
+    palette = {
+        "info": {"background": "#F8FAFC", "border": "#CBD5E1", "accent": "#334155"},
+        "success": {"background": "#F0FDF4", "border": "#BBF7D0", "accent": "#166534"},
+        "warning": {"background": "#FFFBEB", "border": "#FDE68A", "accent": "#92400E"},
+        "error": {"background": "#FEF2F2", "border": "#FECACA", "accent": "#B91C1C"},
+    }[search_state["tone"]]
+    count_label = f"{visible_job_count} job{'s' if visible_job_count != 1 else ''} in view"
+    title = escape(search_state["title"])
+    detail = escape(search_state["detail"])
+    count = escape(count_label)
+    st.caption("Search status")
+    st.markdown(
+        f"""
+        <div style="
+            margin: 0 0 1rem 0;
+            padding: 0.85rem 1rem;
+            border: 1px solid {palette['border']};
+            border-radius: 0.85rem;
+            background: {palette['background']};
+        ">
+          <div style="display:flex; justify-content:space-between; gap:1rem; align-items:flex-start;">
+            <div>
+              <div style="font-size:0.98rem; font-weight:600; color:#111827;">{title}</div>
+              <div style="margin-top:0.2rem; font-size:0.9rem; color:#4B5563;">{detail}</div>
+            </div>
+            <div style="
+                white-space:nowrap;
+                font-size:0.78rem;
+                font-weight:600;
+                color:{palette['accent']};
+                background:#FFFFFFCC;
+                border:1px solid {palette['border']};
+                border-radius:999px;
+                padding:0.25rem 0.6rem;
+            ">{count}</div>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def _match_label(score_payload: dict[str, Any], lead: dict[str, Any]) -> str:
@@ -306,14 +351,7 @@ def render_jobs_screen(
     gap_frame = jobs_backend_gap_frame(filtered_jobs)
     st.markdown(f"### {title}")
     if title == "Jobs":
-        search_state = build_search_state_view_model(search_run)
-        renderer = {
-            "info": st.info,
-            "success": st.success,
-            "warning": st.warning,
-            "error": st.error,
-        }[search_state["tone"]]
-        renderer(f"**{search_state['title']}** {search_state['detail']}")
+        render_search_status_region(search_run, visible_job_count=len(filtered_jobs))
     if not gap_frame.empty:
         with st.expander("Backend/UI field gaps", expanded=False):
             st.dataframe(gap_frame, use_container_width=True, hide_index=True)

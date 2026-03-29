@@ -10,7 +10,7 @@ from services.profile_ingest import build_profile_review_rows
 from ui import app as ui_app
 from ui.components import sidebar as sidebar_component
 from ui.app import filter_and_sort_table
-from ui.screens.jobs import build_job_view_model, build_search_state_view_model, jobs_backend_gap_frame
+from ui.screens.jobs import build_job_view_model, build_search_state_view_model, jobs_backend_gap_frame, render_search_status_region
 
 
 def test_filter_and_sort_table_filters_by_search_and_status() -> None:
@@ -733,6 +733,36 @@ def test_build_search_state_view_model_reports_success_state() -> None:
     assert view_model["tone"] == "success"
     assert view_model["title"] == "Search finished successfully."
     assert "found 5 jobs across 2 queries" in view_model["detail"]
+
+
+def test_render_search_status_region_renders_inline_jobs_status(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeStreamlit:
+        def caption(self, value: str) -> None:
+            captured["caption"] = value
+
+        def markdown(self, value: str, unsafe_allow_html: bool = False) -> None:
+            captured["markdown"] = value
+            captured["unsafe_allow_html"] = unsafe_allow_html
+
+    monkeypatch.setattr("ui.screens.jobs.st", FakeStreamlit())
+
+    render_search_status_region(
+        {
+            "status": "results",
+            "query_count": 2,
+            "result_count": 5,
+            "created_at": "2026-03-29T12:30:00Z",
+        },
+        visible_job_count=3,
+    )
+
+    assert captured["caption"] == "Search status"
+    assert captured["unsafe_allow_html"] is True
+    assert "Search finished successfully." in str(captured["markdown"])
+    assert "The latest run found 5 jobs across 2 queries" in str(captured["markdown"])
+    assert "3 jobs in view" in str(captured["markdown"])
 
 
 def test_runtime_surface_payload_prefers_health_truth_and_merges_summaries() -> None:
