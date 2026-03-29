@@ -10,6 +10,56 @@ from ui.components.job_card import render_job_card
 from ui.components.topbar import render_jobs_topbar
 
 
+def build_search_state_view_model(search_run: dict[str, Any] | None) -> dict[str, str]:
+    if not search_run:
+        return {
+            "tone": "info",
+            "title": "Search has not run yet.",
+            "detail": "Run a refresh to load jobs into this view.",
+        }
+
+    status = str(search_run.get("status") or "").strip().lower()
+    query_count = int(search_run.get("query_count") or 0)
+    result_count = int(search_run.get("result_count") or 0)
+    created_at = _parse_timestamp(search_run.get("created_at"))
+    created_label = (
+        created_at.astimezone(timezone.utc).strftime("%b %d, %Y %I:%M %p UTC")
+        if created_at is not None
+        else "unknown time"
+    )
+
+    if search_run.get("error") or status in {"failed", "error"}:
+        reason = search_run.get("failure_classification") or search_run.get("error") or "unknown error"
+        return {
+            "tone": "error",
+            "title": "Search failed.",
+            "detail": f"The latest run ended with {reason} at {created_label}.",
+        }
+
+    if status in {"queued", "running", "started"}:
+        return {
+            "tone": "info",
+            "title": "Search is running.",
+            "detail": "Jobs will update here when the current run finishes.",
+        }
+
+    if search_run.get("zero_yield") or status in {"empty", "zero_yield"} or result_count == 0:
+        return {
+            "tone": "warning",
+            "title": "Search finished with no matching jobs.",
+            "detail": f"The latest run checked {query_count} quer{'y' if query_count == 1 else 'ies'} at {created_label}.",
+        }
+
+    return {
+        "tone": "success",
+        "title": "Search finished successfully.",
+        "detail": (
+            f"The latest run found {result_count} job{'s' if result_count != 1 else ''} "
+            f"across {query_count} quer{'y' if query_count == 1 else 'ies'} at {created_label}."
+        ),
+    }
+
+
 def _match_label(score_payload: dict[str, Any], lead: dict[str, Any]) -> str:
     band = (score_payload.get("recommendation_band") or lead.get("rank_label") or "").lower()
     if band == "strong":
@@ -239,6 +289,7 @@ def render_job_detail_panel(
 def render_jobs_screen(
     *,
     leads: list[dict[str, Any]],
+    search_run: dict[str, Any] | None = None,
     page_key: str,
     title: str,
     empty_message: str,
@@ -254,6 +305,15 @@ def render_jobs_screen(
     filtered_jobs = _filter_jobs(jobs, filters)
     gap_frame = jobs_backend_gap_frame(filtered_jobs)
     st.markdown(f"### {title}")
+    if title == "Jobs":
+        search_state = build_search_state_view_model(search_run)
+        renderer = {
+            "info": st.info,
+            "success": st.success,
+            "warning": st.warning,
+            "error": st.error,
+        }[search_state["tone"]]
+        renderer(f"**{search_state['title']}** {search_state['detail']}")
     if not gap_frame.empty:
         with st.expander("Backend/UI field gaps", expanded=False):
             st.dataframe(gap_frame, use_container_width=True, hide_index=True)

@@ -1648,8 +1648,10 @@ def main() -> None:
 
     if primary_page == "Jobs":
         leads = fetch_json(base_query)["items"]
+        latest_search_run = fetch_optional_json("/search-runs/latest")
         render_jobs_screen(
             leads=leads,
+            search_run=latest_search_run,
             page_key="jobs",
             title="Jobs",
             empty_message="No matching jobs found. Try adjusting filters or wait for the next discovery cycle.",

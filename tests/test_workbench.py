@@ -10,7 +10,7 @@ from services.profile_ingest import build_profile_review_rows
 from ui import app as ui_app
 from ui.components import sidebar as sidebar_component
 from ui.app import filter_and_sort_table
-from ui.screens.jobs import build_job_view_model, jobs_backend_gap_frame
+from ui.screens.jobs import build_job_view_model, build_search_state_view_model, jobs_backend_gap_frame
 
 
 def test_filter_and_sort_table_filters_by_search_and_status() -> None:
@@ -675,6 +675,64 @@ def test_jobs_backend_gap_frame_flattens_missing_fields() -> None:
     )
 
     assert frame["missing_field"].tolist() == ["work_mode", "salary"]
+
+
+def test_build_search_state_view_model_reports_running_state() -> None:
+    view_model = build_search_state_view_model(
+        {
+            "status": "running",
+            "query_count": 2,
+            "result_count": 0,
+        }
+    )
+
+    assert view_model["tone"] == "info"
+    assert view_model["title"] == "Search is running."
+    assert "current run finishes" in view_model["detail"]
+
+
+def test_build_search_state_view_model_reports_failure_state() -> None:
+    view_model = build_search_state_view_model(
+        {
+            "status": "failed",
+            "failure_classification": "timeout",
+            "created_at": "2026-03-29T12:30:00Z",
+        }
+    )
+
+    assert view_model["tone"] == "error"
+    assert view_model["title"] == "Search failed."
+    assert "timeout" in view_model["detail"]
+
+
+def test_build_search_state_view_model_reports_zero_results_state() -> None:
+    view_model = build_search_state_view_model(
+        {
+            "status": "empty",
+            "query_count": 1,
+            "result_count": 0,
+            "created_at": "2026-03-29T12:30:00Z",
+        }
+    )
+
+    assert view_model["tone"] == "warning"
+    assert view_model["title"] == "Search finished with no matching jobs."
+    assert "checked 1 query" in view_model["detail"]
+
+
+def test_build_search_state_view_model_reports_success_state() -> None:
+    view_model = build_search_state_view_model(
+        {
+            "status": "results",
+            "query_count": 2,
+            "result_count": 5,
+            "created_at": "2026-03-29T12:30:00Z",
+        }
+    )
+
+    assert view_model["tone"] == "success"
+    assert view_model["title"] == "Search finished successfully."
+    assert "found 5 jobs across 2 queries" in view_model["detail"]
 
 
 def test_runtime_surface_payload_prefers_health_truth_and_merges_summaries() -> None:
