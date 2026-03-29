@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from asyncio import run
 from datetime import timedelta
 from pathlib import Path
 
@@ -10,6 +11,7 @@ from sqlalchemy.pool import StaticPool
 
 from api.main import app
 from api.routes.search_runs import latest_search_run
+from core.db import get_db
 from core.config import Settings
 from core.models import AgentRun, AlertEvent, Base, ConnectorHealth, RunDigest, SearchRun, SourceQuery, WatchlistItem
 from core.time import utcnow
@@ -26,6 +28,47 @@ def build_session():
     )
     Base.metadata.create_all(engine)
     return sessionmaker(bind=engine, expire_on_commit=False)()
+
+
+def get_json(path: str) -> tuple[int, dict[str, str], object]:
+    messages: list[dict[str, object]] = []
+    body_sent = False
+
+    async def receive() -> dict[str, object]:
+        nonlocal body_sent
+        if body_sent:
+            return {"type": "http.disconnect"}
+        body_sent = True
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message: dict[str, object]) -> None:
+        messages.append(message)
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "GET",
+        "scheme": "http",
+        "path": path,
+        "raw_path": path.encode("ascii"),
+        "query_string": b"",
+        "headers": [(b"host", b"testserver")],
+        "client": ("testclient", 50000),
+        "server": ("testserver", 80),
+        "root_path": "",
+    }
+    run(app(scope, receive, send))
+
+    start = next(message for message in messages if message["type"] == "http.response.start")
+    body_chunks = [message.get("body", b"") for message in messages if message["type"] == "http.response.body"]
+    payload = b"".join(chunk if isinstance(chunk, bytes) else b"" for chunk in body_chunks).decode("utf-8")
+    headers = {
+        key.decode("latin1"): value.decode("latin1")
+        for key, value in start.get("headers", [])
+        if isinstance(key, bytes) and isinstance(value, bytes)
+    }
+    return int(start["status"]), headers, json.loads(payload) if payload else None
 
 
 def test_runtime_connector_set_respects_greenhouse_kill_switch() -> None:
@@ -141,6 +184,54 @@ def test_search_runs_latest_endpoint_returns_most_recent_run() -> None:
 
     assert response is not None
     payload = response.model_dump(mode="json") if hasattr(response, "model_dump") else json.loads(response.json())
+    assert payload == {
+        "id": latest.id,
+        "source_key": "search_web",
+        "worker_name": "search",
+        "provider": "duckduckgo_html",
+        "status": "results",
+        "live": True,
+        "zero_yield": False,
+        "query_count": 2,
+        "result_count": 5,
+        "queries": ["latest query one", "latest query two"],
+        "failure_classification": None,
+        "error": None,
+        "diagnostics_json": {"status": "results"},
+        "created_at": latest.created_at.isoformat().replace("+00:00", "Z"),
+    }
+
+
+def test_search_runs_latest_http_endpoint_returns_latest_run_payload() -> None:
+    session = build_session()
+    latest = SearchRun(
+        worker_name="search",
+        provider="duckduckgo_html",
+        status="results",
+        live=True,
+        zero_yield=False,
+        query_count=2,
+        result_count=5,
+        queries_json=["latest query one", "latest query two"],
+        diagnostics_json={"status": "results"},
+    )
+    session.add(latest)
+    session.flush()
+
+    def override_get_db():
+        try:
+            yield session
+        finally:
+            pass
+
+    app.dependency_overrides[get_db] = override_get_db
+    try:
+        status_code, _headers, payload = get_json("/search-runs/latest")
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+        session.close()
+
+    assert status_code == 200
     assert payload == {
         "id": latest.id,
         "source_key": "search_web",
