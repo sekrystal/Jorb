@@ -10,7 +10,13 @@ from services.profile_ingest import build_profile_review_rows
 from ui import app as ui_app
 from ui.components import sidebar as sidebar_component
 from ui.app import filter_and_sort_table
-from ui.screens.jobs import build_job_view_model, build_search_state_view_model, jobs_backend_gap_frame, render_search_status_region
+from ui.screens.jobs import (
+    build_job_view_model,
+    build_jobs_empty_state_view_model,
+    build_search_state_view_model,
+    jobs_backend_gap_frame,
+    render_search_status_region,
+)
 
 
 def test_filter_and_sort_table_filters_by_search_and_status() -> None:
@@ -763,6 +769,38 @@ def test_render_search_status_region_renders_inline_jobs_status(monkeypatch) -> 
     assert "Search finished successfully." in str(captured["markdown"])
     assert "The latest run found 5 jobs across 2 queries" in str(captured["markdown"])
     assert "3 jobs in view" in str(captured["markdown"])
+
+
+def test_build_jobs_empty_state_view_model_reports_filter_hidden_results() -> None:
+    view_model = build_jobs_empty_state_view_model(
+        {
+            "status": "results",
+            "query_count": 2,
+            "result_count": 5,
+            "created_at": "2026-03-29T12:30:00Z",
+        },
+        total_job_count=5,
+        filters={"search": "staff", "location": "", "remote_only": False},
+    )
+
+    assert view_model["title"] == "No jobs match the current filters."
+    assert view_model["show_clear_filters"] is True
+
+
+def test_build_jobs_empty_state_view_model_reports_running_search() -> None:
+    view_model = build_jobs_empty_state_view_model(
+        {
+            "status": "running",
+            "query_count": 2,
+            "result_count": 0,
+            "created_at": "2026-03-29T12:30:00Z",
+        },
+        total_job_count=0,
+        filters={"search": "", "location": "", "remote_only": False},
+    )
+
+    assert view_model["title"] == "Search is running."
+    assert "current run finishes" in view_model["detail"]
 
 
 def test_runtime_surface_payload_prefers_health_truth_and_merges_summaries() -> None:

@@ -105,6 +105,53 @@ def render_search_status_region(search_run: dict[str, Any] | None, *, visible_jo
     )
 
 
+def build_jobs_empty_state_view_model(
+    search_run: dict[str, Any] | None,
+    *,
+    total_job_count: int,
+    filters: dict[str, Any],
+) -> dict[str, Any]:
+    has_filters = bool(filters["search"].strip() or filters["location"].strip() or filters["remote_only"])
+    if total_job_count > 0 and has_filters:
+        return {
+            "title": "No jobs match the current filters.",
+            "detail": "Clear filters or adjust the current search terms to see the latest jobs in this list.",
+            "show_clear_filters": True,
+        }
+
+    search_state = build_search_state_view_model(search_run)
+    if search_state["tone"] == "success":
+        return {
+            "title": "Search finished, but no jobs are visible yet.",
+            "detail": search_state["detail"],
+            "show_clear_filters": False,
+        }
+
+    return {
+        "title": search_state["title"],
+        "detail": search_state["detail"],
+        "show_clear_filters": False,
+    }
+
+
+def render_jobs_empty_state(
+    search_run: dict[str, Any] | None,
+    *,
+    total_job_count: int,
+    filters: dict[str, Any],
+    page_key: str,
+) -> None:
+    empty_state = build_jobs_empty_state_view_model(search_run, total_job_count=total_job_count, filters=filters)
+    st.info(f"{empty_state['title']} {empty_state['detail']}".strip())
+    if not empty_state["show_clear_filters"]:
+        return
+    if st.button("Clear filters", key=f"jobs-clear-filters-{page_key}"):
+        st.session_state[f"jobs-search-{page_key}"] = ""
+        st.session_state[f"jobs-location-{page_key}"] = ""
+        st.session_state[f"jobs-remote-{page_key}"] = False
+        st.rerun()
+
+
 def _match_label(score_payload: dict[str, Any], lead: dict[str, Any]) -> str:
     band = (score_payload.get("recommendation_band") or lead.get("rank_label") or "").lower()
     if band == "strong":
@@ -362,7 +409,15 @@ def render_jobs_screen(
 
     with list_col:
         if not filtered_jobs:
-            st.info(empty_message)
+            if title == "Jobs":
+                render_jobs_empty_state(
+                    search_run,
+                    total_job_count=len(jobs),
+                    filters=filters,
+                    page_key=page_key,
+                )
+            else:
+                st.info(empty_message)
             return
         for job in filtered_jobs:
             render_job_card(
