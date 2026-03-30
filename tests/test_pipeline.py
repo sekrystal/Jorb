@@ -6,10 +6,10 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from connectors.search_web import SearchDiscoveryResult
+from connectors.search_web import ATSExtractionResult, SearchDiscoveryResult
 from core.config import Settings
 from core.schemas import LeadResponse
-from core.models import AgentActivity, AgentRun, Base, Lead, Listing
+from core.models import AgentActivity, AgentRun, Base, CompanyDiscovery, Lead, Listing
 from core.schemas import SyncResult
 from services.company_discovery import build_discovery_status
 from services.normalize import normalize_ashby_job, normalize_greenhouse_job, normalize_yc_job
@@ -709,6 +709,168 @@ def test_sync_all_treats_ats_seed_results_as_search_acquisition_success(monkeypa
     assert source_truth["search_web"]["ran"] is True
     assert source_truth["search_web"]["zero_yield"] is False
     assert source_truth["search_web"]["yielded_results_count"] == 1
+
+
+def test_sync_all_uses_scrape_fallback_when_structured_jobs_verify_to_zero(monkeypatch) -> None:
+    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine, expire_on_commit=False)()
+
+    ingest_resume(
+        session,
+        filename="resume.txt",
+        raw_text="Operator with chief of staff and founding operations experience.",
+    )
+
+    settings = Settings(
+        demo_mode=True,
+        search_discovery_enabled=True,
+        discovery_max_search_queries_per_cycle=4,
+        discovery_max_expansions_per_cycle=4,
+        discovery_max_new_companies_per_cycle=4,
+        openai_enabled=False,
+    )
+
+    monkeypatch.setattr("services.sync.get_settings", lambda: settings)
+    monkeypatch.setattr(
+        "services.sync.planner_agent",
+        lambda *_args, **_kwargs: {
+            "queries": ['"chief of staff" startup careers'],
+            "structured_query_plans": {
+                "ats": [
+                    {
+                        "query_text": 'site:job-boards.greenhouse.io "chief of staff"',
+                        "executable": True,
+                    }
+                ],
+                "search": [],
+                "weak_signal": [],
+            },
+            "query_themes": [],
+            "company_archetypes": [],
+            "priority_notes": [],
+        },
+    )
+    monkeypatch.setattr(
+        "services.sync.SearchDiscoveryConnector.fetch",
+        lambda self, queries, require_live=False: (
+            [
+                SearchDiscoveryResult(
+                    query_text=queries[0],
+                    title="Chief of Staff - Acme",
+                    url="https://job-boards.greenhouse.io/acme/jobs/1",
+                    source_surface="search_web",
+                    query_family="ats_direct",
+                )
+            ],
+            True,
+        ),
+    )
+
+    def fake_extractor(results, settings=None):
+        if results and results[0].source_surface == "structured_zero_yield_fallback":
+            extraction = ATSExtractionResult(
+                source_url="https://acme.ai/careers",
+                final_url="https://acme.ai/careers",
+                page_title="Acme Careers",
+                company_name="Acme",
+                careers_url="https://acme.ai/careers",
+                ats_type="greenhouse",
+                greenhouse_tokens=["acme-next"],
+                discovered_urls=["https://acme.ai/careers"],
+                confidence=0.91,
+            )
+            return (
+                [extraction],
+                [
+                    SearchDiscoveryResult(
+                        query_text=results[0].query_text,
+                        title="Chief of Staff - Acme",
+                        url="https://job-boards.greenhouse.io/acme-next/jobs",
+                        source_surface="structured_zero_yield_fallback",
+                        query_family="ats_direct",
+                    )
+                ],
+            )
+        extraction = ATSExtractionResult(
+            source_url="https://job-boards.greenhouse.io/acme/jobs/1",
+            final_url="https://job-boards.greenhouse.io/acme/jobs/1",
+            page_title="Chief of Staff - Acme",
+            company_name="Acme",
+            careers_url="https://acme.ai/careers",
+            ats_type="greenhouse",
+            greenhouse_tokens=["acme"],
+            discovered_urls=["https://acme.ai/careers"],
+            confidence=0.87,
+        )
+        return ([extraction], [])
+
+    monkeypatch.setattr("services.sync.extractor_agent", fake_extractor)
+
+    def fake_greenhouse_fetch(self, require_live, tokens, discovery_queries=None):
+        if tokens == ["acme-next"]:
+            return (
+                [
+                    {
+                        "company_name": "Acme",
+                        "company_domain": "acme.ai",
+                        "title": "Chief of Staff",
+                        "absolute_url": "https://job-boards.greenhouse.io/acme-next/jobs/2",
+                        "url": "https://job-boards.greenhouse.io/acme-next/jobs/2",
+                        "location": {"name": "Remote US"},
+                        "content": "Build operating cadence.",
+                        "source_board_token": "acme-next",
+                        "id": "2",
+                        "first_published": "2026-03-28T00:00:00Z",
+                        "updated_at": "2026-03-28T12:00:00Z",
+                        "discovery_source": "search_web",
+                        "source_queries": ['site:job-boards.greenhouse.io "chief of staff"'],
+                    }
+                ],
+                True,
+            )
+        return (
+            [
+                {
+                    "company_name": "Acme",
+                    "company_domain": "acme.ai",
+                    "title": "Chief of Staff",
+                    "absolute_url": "https://job-boards.greenhouse.io/acme/jobs/1",
+                    "url": "https://job-boards.greenhouse.io/acme/jobs/1",
+                    "location": {"name": "Remote US"},
+                    "content": "Build operating cadence.",
+                    "source_board_token": "acme",
+                    "id": "1",
+                    "first_published": "2026-01-01T00:00:00Z",
+                    "updated_at": "2026-01-01T12:00:00Z",
+                    "discovery_source": "search_web",
+                    "source_queries": ['site:job-boards.greenhouse.io "chief of staff"'],
+                }
+            ],
+            True,
+        )
+
+    monkeypatch.setattr("services.sync.GreenhouseConnector.fetch", fake_greenhouse_fetch)
+    monkeypatch.setattr("services.sync.AshbyConnector.fetch", lambda self, *_args, **_kwargs: ([], False))
+    monkeypatch.setattr("services.sync.XSearchConnector.fetch", lambda self, *_args, **_kwargs: ([], False))
+    monkeypatch.setattr(
+        "services.sync.verify_listing",
+        lambda record: None if record.url.endswith("/acme/jobs/1") else record,
+    )
+
+    result = sync_all(session, include_rechecks=False, enabled_connectors={"search_web", "greenhouse"})
+    session.commit()
+
+    listing = session.query(Listing).filter(Listing.source_type == "greenhouse").one()
+    company = session.query(CompanyDiscovery).filter(CompanyDiscovery.discovery_key == "greenhouse:acme").one()
+    source_truth = {item["source_key"]: item for item in result.discovery_status["source_matrix"]}
+
+    assert listing.url == "https://job-boards.greenhouse.io/acme-next/jobs/2"
+    assert result.discovery_metrics["greenhouse"]["verified"] == 1
+    assert company.last_expansion_result_count == 2
+    assert source_truth["greenhouse"]["yielded_results_count"] == 1
+    assert source_truth["greenhouse"]["fallback_count"] >= 1
+    assert source_truth["search_web_scrape_fallback"]["ran"] is True
 
 
 def test_build_discovery_status_surfaces_verified_ranked_agentic_jobs() -> None:

@@ -288,8 +288,8 @@ def _expansion_fallback_diagnostics(
 def _build_structured_zero_yield_fallback_results(
     selected_discoveries: list[tuple],
     *,
-    greenhouse_job_counts: dict[str, int],
-    ashby_job_counts: Counter,
+    greenhouse_useful_job_counts: dict[str, int],
+    ashby_useful_job_counts: Counter,
 ) -> tuple[list[SearchDiscoveryResult], dict[str, dict[str, object]], dict[str, set[str]]]:
     fallback_results: list[SearchDiscoveryResult] = []
     fallback_state_by_key: dict[str, dict[str, object]] = {}
@@ -298,9 +298,9 @@ def _build_structured_zero_yield_fallback_results(
 
     for candidate, row, _, _ in selected_discoveries:
         if candidate.board_type == "greenhouse":
-            result_count = int(greenhouse_job_counts.get(candidate.board_locator, 0))
+            result_count = int(greenhouse_useful_job_counts.get(candidate.board_locator, 0))
         elif candidate.board_type == "ashby":
-            result_count = int(ashby_job_counts.get(candidate.board_locator, 0))
+            result_count = int(ashby_useful_job_counts.get(candidate.board_locator, 0))
         else:
             continue
         if result_count > 0:
@@ -1606,6 +1606,9 @@ def sync_all(
         "verified": search_verified_count,
     }
 
+    greenhouse_fallback_used = False
+    ashby_fallback_used = False
+
     if "greenhouse" in enabled_connectors:
         greenhouse_tokens = list(dict.fromkeys(settings.greenhouse_tokens + list(discovered_greenhouse_queries)))
         greenhouse_jobs, greenhouse_live, _ = run_connector_fetch(
@@ -1619,15 +1622,6 @@ def sync_all(
             ),
             date_fields=["first_published", "updated_at"],
         )
-        if greenhouse_tokens:
-            _record_source_runtime_observer(
-                source_runtime_observer,
-                "greenhouse",
-                attempted=True,
-                zero_yield=len(greenhouse_jobs) == 0,
-                yielded_results=len(greenhouse_jobs),
-                status="jobs_returned" if greenhouse_jobs else "empty_jobs",
-            )
     if "ashby" in enabled_connectors:
         ashby_orgs = list(dict.fromkeys(settings.ashby_orgs + list(discovered_ashby_queries)))
         logger.info(
@@ -1649,147 +1643,6 @@ def sync_all(
             ),
             date_fields=["publishedDate"],
         )
-        if ashby_orgs:
-            _record_source_runtime_observer(
-                source_runtime_observer,
-                "ashby",
-                attempted=True,
-                zero_yield=len(ashby_jobs) == 0,
-                yielded_results=len(ashby_jobs),
-                status="jobs_returned" if ashby_jobs else "empty_jobs",
-            )
-    greenhouse_job_counts = dict(getattr(greenhouse_connector, "last_board_counts", {}) or {})
-    ashby_job_counts = Counter(job.get("source_org_key") for job in ashby_jobs if job.get("source_org_key"))
-    fallback_seed_results, structured_fallback_state_by_key, fallback_url_to_discovery_keys = _build_structured_zero_yield_fallback_results(
-        selected_discoveries,
-        greenhouse_job_counts=greenhouse_job_counts,
-        ashby_job_counts=ashby_job_counts,
-    )
-    if fallback_seed_results:
-        fallback_seed_by_url = {result.url: result for result in fallback_seed_results}
-        fallback_origin_by_derived_key: dict[str, set[str]] = defaultdict(set)
-        for state in structured_fallback_state_by_key.values():
-            state["scrape_parse_attempted"] = True
-        fallback_extractions, fallback_derived_results = extractor_agent(fallback_seed_results, settings=settings)
-        cycle_metrics["scrape_parse_extraction_count"] += len(fallback_extractions)
-        cycle_metrics["scrape_parse_derived_result_count"] += len(fallback_derived_results)
-        _record_source_runtime_observer(
-            source_runtime_observer,
-            "search_web_scrape_fallback",
-            attempted=True,
-            zero_yield=len(fallback_derived_results) == 0,
-            yielded_results=len(fallback_derived_results),
-            fallback_used=True,
-            fallback_order=["structured_connector_poll", "scrape_parse_fallback"],
-            status="derived_candidates" if fallback_derived_results else "no_ats_identifiers_extracted",
-        )
-        for extraction in fallback_extractions:
-            related_keys = set(fallback_url_to_discovery_keys.get(extraction.source_url, set()))
-            related_keys.update(fallback_url_to_discovery_keys.get(extraction.final_url, set()))
-            for discovery_key in related_keys:
-                state = structured_fallback_state_by_key.setdefault(
-                    discovery_key,
-                    {
-                        "scrape_parse_attempted": False,
-                        "scrape_parse_extraction_count": 0,
-                        "scrape_parse_derived_candidate_count": 0,
-                        "scrape_parse_recovered_result_count": 0,
-                        "scrape_parse_candidate_urls": [],
-                    },
-                )
-                state["scrape_parse_attempted"] = True
-                state["scrape_parse_extraction_count"] = int(state.get("scrape_parse_extraction_count", 0) or 0) + 1
-                seed_result = fallback_seed_by_url.get(extraction.source_url) or fallback_seed_by_url.get(extraction.final_url)
-                if seed_result is not None:
-                    derived_candidates = derive_search_results_from_extraction(
-                        seed_result.query_text,
-                        extraction,
-                        source_surface="structured_zero_yield_fallback",
-                    )
-                    state["scrape_parse_derived_candidate_count"] = int(
-                        state.get("scrape_parse_derived_candidate_count", 0) or 0
-                    ) + len(derived_candidates)
-                    for derived_candidate in derived_candidates:
-                        mapped_candidate = candidate_from_search_result(derived_candidate)
-                        if mapped_candidate is None:
-                            continue
-                        fallback_origin_by_derived_key[mapped_candidate.discovery_key].add(discovery_key)
-
-        fallback_greenhouse_queries: dict[str, list[str]] = {}
-        fallback_ashby_queries: dict[str, list[str]] = {}
-        configured_greenhouse_tokens = {token.lower() for token in settings.greenhouse_tokens}
-        configured_ashby_orgs = {org.lower() for org in settings.ashby_orgs}
-        for result in fallback_derived_results:
-            candidate = candidate_from_search_result(result)
-            if candidate is None:
-                continue
-            if candidate.board_type == "greenhouse":
-                locator = candidate.board_locator
-                if locator.lower() in configured_greenhouse_tokens or locator in discovered_greenhouse_queries:
-                    continue
-                fallback_greenhouse_queries.setdefault(locator, [result.query_text])
-            elif candidate.board_type == "ashby":
-                locator = candidate.board_locator
-                if locator.lower() in configured_ashby_orgs or locator in discovered_ashby_queries:
-                    continue
-                fallback_ashby_queries.setdefault(locator, [result.query_text])
-
-        if "greenhouse" in enabled_connectors and fallback_greenhouse_queries:
-            fallback_greenhouse_jobs, greenhouse_live, _ = run_connector_fetch(
-                session,
-                "greenhouse",
-                partial(
-                    greenhouse_connector.fetch,
-                    "greenhouse" in strict_live_connectors,
-                    list(fallback_greenhouse_queries),
-                    fallback_greenhouse_queries,
-                ),
-                date_fields=["updated_at", "absolute_url", "first_published"],
-            )
-            greenhouse_jobs.extend(fallback_greenhouse_jobs)
-            for job in fallback_greenhouse_jobs:
-                discovery_key = f"greenhouse:{str(job.get('source_board_token') or '').lower()}"
-                for origin_key in fallback_origin_by_derived_key.get(discovery_key, set()):
-                    state = structured_fallback_state_by_key.setdefault(origin_key, {})
-                    state["scrape_parse_recovered_result_count"] = int(state.get("scrape_parse_recovered_result_count", 0) or 0) + 1
-            _record_source_runtime_observer(
-                source_runtime_observer,
-                "greenhouse",
-                attempted=True,
-                zero_yield=len(fallback_greenhouse_jobs) == 0,
-                yielded_results=len(fallback_greenhouse_jobs),
-                fallback_used=True,
-                fallback_order=["structured_connector_poll", "scrape_parse_fallback"],
-                status="jobs_returned" if fallback_greenhouse_jobs else "empty_jobs",
-            )
-        if "ashby" in enabled_connectors and fallback_ashby_queries:
-            fallback_ashby_jobs, ashby_live, _ = run_connector_fetch(
-                session,
-                "ashby",
-                partial(
-                    ashby_connector.fetch,
-                    "ashby" in strict_live_connectors,
-                    list(fallback_ashby_queries),
-                    fallback_ashby_queries,
-                ),
-                date_fields=["publishedDate"],
-            )
-            ashby_jobs.extend(fallback_ashby_jobs)
-            for job in fallback_ashby_jobs:
-                discovery_key = f"ashby:{str(job.get('source_org_key') or '').lower()}"
-                for origin_key in fallback_origin_by_derived_key.get(discovery_key, set()):
-                    state = structured_fallback_state_by_key.setdefault(origin_key, {})
-                    state["scrape_parse_recovered_result_count"] = int(state.get("scrape_parse_recovered_result_count", 0) or 0) + 1
-            _record_source_runtime_observer(
-                source_runtime_observer,
-                "ashby",
-                attempted=True,
-                zero_yield=len(fallback_ashby_jobs) == 0,
-                yielded_results=len(fallback_ashby_jobs),
-                fallback_used=True,
-                fallback_order=["structured_connector_poll", "scrape_parse_fallback"],
-                status="jobs_returned" if fallback_ashby_jobs else "empty_jobs",
-            )
     for discovery_key, payload in discovered_yc_jobs.items():
         try:
             final_url, html = fetch_page_snapshot(str(payload["result_url"]))
@@ -1874,6 +1727,261 @@ def sync_all(
             provenance = (selected_row.metadata_json or {}).get("surface_provenance", provenance)
         job["surface_provenance"] = provenance
         job["source_lineage"] = source_lineage_for_surface("ashby", provenance, job.get("discovery_source"))
+    if "x_search" in enabled_connectors:
+        x_raw_signals, x_live, _ = run_connector_fetch(
+            session,
+            "x_search",
+            partial(x_connector.fetch, queries, "x_search" in strict_live_connectors),
+            date_fields=["published_at"],
+        )
+        _record_source_runtime_observer(
+            source_runtime_observer,
+            "x_search",
+            attempted=True,
+            zero_yield=len(x_raw_signals) == 0,
+            yielded_results=len(x_raw_signals),
+            status="signals_returned" if x_raw_signals else "empty_signals",
+        )
+
+    greenhouse_normalized = [normalize_greenhouse_job(job) for job in greenhouse_jobs]
+    greenhouse_verified = [record for record in (verify_listing(record) for record in greenhouse_normalized if _verify_listing_record(record)) if record is not None]
+    cycle_metrics["agent_discovered_listings_count"] += sum(
+        1
+        for record in greenhouse_normalized
+        if (record.metadata_json or {}).get("surface_provenance") in {"discovered_existing", "discovered_new"}
+    )
+    cycle_metrics["agent_discovered_verified_listings_count"] += sum(
+        1
+        for record in greenhouse_verified
+        if (record.metadata_json or {}).get("surface_provenance") in {"discovered_existing", "discovered_new"}
+    )
+    discovery_metrics["greenhouse"] = {
+        "raw": len(greenhouse_jobs),
+        "normalized": len(greenhouse_normalized),
+        "verified": len(greenhouse_verified),
+    }
+    logger.info(
+        "[VERIFICATION] connector=greenhouse before=%s after=%s",
+        len(greenhouse_normalized),
+        len(greenhouse_verified),
+    )
+
+    ashby_normalized = [normalize_ashby_job(job, job.get("companyName")) for job in ashby_jobs]
+    ashby_verified = [record for record in (verify_listing(record) for record in ashby_normalized if _verify_listing_record(record)) if record is not None]
+    cycle_metrics["agent_discovered_listings_count"] += sum(
+        1
+        for record in ashby_normalized
+        if (record.metadata_json or {}).get("surface_provenance") in {"discovered_existing", "discovered_new"}
+    )
+    cycle_metrics["agent_discovered_verified_listings_count"] += sum(
+        1
+        for record in ashby_verified
+        if (record.metadata_json or {}).get("surface_provenance") in {"discovered_existing", "discovered_new"}
+    )
+    discovery_metrics["ashby"] = {
+        "raw": len(ashby_jobs),
+        "normalized": len(ashby_normalized),
+        "verified": len(ashby_verified),
+    }
+    logger.info(
+        "[VERIFICATION] connector=ashby before=%s after=%s",
+        len(ashby_normalized),
+        len(ashby_verified),
+    )
+
+    greenhouse_verified_job_counts = Counter(
+        (record.metadata_json or {}).get("source_board_token")
+        for record in greenhouse_verified
+        if (record.metadata_json or {}).get("source_board_token")
+    )
+    ashby_verified_job_counts = Counter(
+        (record.metadata_json or {}).get("source_org_key")
+        for record in ashby_verified
+        if (record.metadata_json or {}).get("source_org_key")
+    )
+    fallback_seed_results, structured_fallback_state_by_key, fallback_url_to_discovery_keys = _build_structured_zero_yield_fallback_results(
+        selected_discoveries,
+        greenhouse_useful_job_counts=greenhouse_verified_job_counts,
+        ashby_useful_job_counts=ashby_verified_job_counts,
+    )
+    if fallback_seed_results:
+        fallback_seed_by_url = {result.url: result for result in fallback_seed_results}
+        fallback_origin_by_derived_key: dict[str, set[str]] = defaultdict(set)
+        for state in structured_fallback_state_by_key.values():
+            state["scrape_parse_attempted"] = True
+        fallback_extractions, fallback_derived_results = extractor_agent(fallback_seed_results, settings=settings)
+        cycle_metrics["scrape_parse_extraction_count"] += len(fallback_extractions)
+        cycle_metrics["scrape_parse_derived_result_count"] += len(fallback_derived_results)
+        _record_source_runtime_observer(
+            source_runtime_observer,
+            "search_web_scrape_fallback",
+            attempted=True,
+            zero_yield=len(fallback_derived_results) == 0,
+            yielded_results=len(fallback_derived_results),
+            fallback_used=True,
+            fallback_order=["structured_connector_poll", "scrape_parse_fallback"],
+            status="derived_candidates" if fallback_derived_results else "no_ats_identifiers_extracted",
+        )
+        for extraction in fallback_extractions:
+            related_keys = set(fallback_url_to_discovery_keys.get(extraction.source_url, set()))
+            related_keys.update(fallback_url_to_discovery_keys.get(extraction.final_url, set()))
+            for discovery_key in related_keys:
+                state = structured_fallback_state_by_key.setdefault(
+                    discovery_key,
+                    {
+                        "scrape_parse_attempted": False,
+                        "scrape_parse_extraction_count": 0,
+                        "scrape_parse_derived_candidate_count": 0,
+                        "scrape_parse_recovered_result_count": 0,
+                        "scrape_parse_candidate_urls": [],
+                    },
+                )
+                state["scrape_parse_attempted"] = True
+                state["scrape_parse_extraction_count"] = int(state.get("scrape_parse_extraction_count", 0) or 0) + 1
+                seed_result = fallback_seed_by_url.get(extraction.source_url) or fallback_seed_by_url.get(extraction.final_url)
+                if seed_result is not None:
+                    derived_candidates = derive_search_results_from_extraction(
+                        seed_result.query_text,
+                        extraction,
+                        source_surface="structured_zero_yield_fallback",
+                    )
+                    state["scrape_parse_derived_candidate_count"] = int(
+                        state.get("scrape_parse_derived_candidate_count", 0) or 0
+                    ) + len(derived_candidates)
+                    for derived_candidate in derived_candidates:
+                        mapped_candidate = candidate_from_search_result(derived_candidate)
+                        if mapped_candidate is None:
+                            continue
+                        fallback_origin_by_derived_key[mapped_candidate.discovery_key].add(discovery_key)
+
+        fallback_greenhouse_queries: dict[str, list[str]] = {}
+        fallback_ashby_queries: dict[str, list[str]] = {}
+        configured_greenhouse_tokens = {token.lower() for token in settings.greenhouse_tokens}
+        configured_ashby_orgs = {org.lower() for org in settings.ashby_orgs}
+        for result in fallback_derived_results:
+            candidate = candidate_from_search_result(result)
+            if candidate is None:
+                continue
+            if candidate.board_type == "greenhouse":
+                locator = candidate.board_locator
+                if locator.lower() in configured_greenhouse_tokens or locator in discovered_greenhouse_queries:
+                    continue
+                fallback_greenhouse_queries.setdefault(locator, [result.query_text])
+            elif candidate.board_type == "ashby":
+                locator = candidate.board_locator
+                if locator.lower() in configured_ashby_orgs or locator in discovered_ashby_queries:
+                    continue
+                fallback_ashby_queries.setdefault(locator, [result.query_text])
+
+        if "greenhouse" in enabled_connectors and fallback_greenhouse_queries:
+            fallback_greenhouse_jobs, greenhouse_live, _ = run_connector_fetch(
+                session,
+                "greenhouse",
+                partial(
+                    greenhouse_connector.fetch,
+                    "greenhouse" in strict_live_connectors,
+                    list(fallback_greenhouse_queries),
+                    fallback_greenhouse_queries,
+                ),
+                date_fields=["updated_at", "absolute_url", "first_published"],
+            )
+            greenhouse_jobs.extend(fallback_greenhouse_jobs)
+            fallback_greenhouse_normalized = [normalize_greenhouse_job(job) for job in fallback_greenhouse_jobs]
+            greenhouse_normalized.extend(fallback_greenhouse_normalized)
+            fallback_greenhouse_verified = [
+                record
+                for record in (verify_listing(record) for record in fallback_greenhouse_normalized if _verify_listing_record(record))
+                if record is not None
+            ]
+            greenhouse_verified.extend(fallback_greenhouse_verified)
+            cycle_metrics["agent_discovered_listings_count"] += sum(
+                1
+                for record in fallback_greenhouse_normalized
+                if (record.metadata_json or {}).get("surface_provenance") in {"discovered_existing", "discovered_new"}
+            )
+            cycle_metrics["agent_discovered_verified_listings_count"] += sum(
+                1
+                for record in fallback_greenhouse_verified
+                if (record.metadata_json or {}).get("surface_provenance") in {"discovered_existing", "discovered_new"}
+            )
+            greenhouse_fallback_used = True
+            for record in fallback_greenhouse_verified:
+                discovery_key = f"greenhouse:{str((record.metadata_json or {}).get('source_board_token') or '').lower()}"
+                for origin_key in fallback_origin_by_derived_key.get(discovery_key, set()):
+                    state = structured_fallback_state_by_key.setdefault(origin_key, {})
+                    state["scrape_parse_recovered_result_count"] = int(state.get("scrape_parse_recovered_result_count", 0) or 0) + 1
+        if "ashby" in enabled_connectors and fallback_ashby_queries:
+            fallback_ashby_jobs, ashby_live, _ = run_connector_fetch(
+                session,
+                "ashby",
+                partial(
+                    ashby_connector.fetch,
+                    "ashby" in strict_live_connectors,
+                    list(fallback_ashby_queries),
+                    fallback_ashby_queries,
+                ),
+                date_fields=["publishedDate"],
+            )
+            ashby_jobs.extend(fallback_ashby_jobs)
+            fallback_ashby_normalized = [normalize_ashby_job(job, job.get("companyName")) for job in fallback_ashby_jobs]
+            ashby_normalized.extend(fallback_ashby_normalized)
+            fallback_ashby_verified = [
+                record
+                for record in (verify_listing(record) for record in fallback_ashby_normalized if _verify_listing_record(record))
+                if record is not None
+            ]
+            ashby_verified.extend(fallback_ashby_verified)
+            cycle_metrics["agent_discovered_listings_count"] += sum(
+                1
+                for record in fallback_ashby_normalized
+                if (record.metadata_json or {}).get("surface_provenance") in {"discovered_existing", "discovered_new"}
+            )
+            cycle_metrics["agent_discovered_verified_listings_count"] += sum(
+                1
+                for record in fallback_ashby_verified
+                if (record.metadata_json or {}).get("surface_provenance") in {"discovered_existing", "discovered_new"}
+            )
+            ashby_fallback_used = True
+            for record in fallback_ashby_verified:
+                discovery_key = f"ashby:{str((record.metadata_json or {}).get('source_org_key') or '').lower()}"
+                for origin_key in fallback_origin_by_derived_key.get(discovery_key, set()):
+                    state = structured_fallback_state_by_key.setdefault(origin_key, {})
+                    state["scrape_parse_recovered_result_count"] = int(state.get("scrape_parse_recovered_result_count", 0) or 0) + 1
+
+    discovery_metrics["greenhouse"] = {
+        "raw": len(greenhouse_jobs),
+        "normalized": len(greenhouse_normalized),
+        "verified": len(greenhouse_verified),
+    }
+    discovery_metrics["ashby"] = {
+        "raw": len(ashby_jobs),
+        "normalized": len(ashby_normalized),
+        "verified": len(ashby_verified),
+    }
+
+    if "greenhouse" in enabled_connectors and (settings.greenhouse_tokens or discovered_greenhouse_queries):
+        _record_source_runtime_observer(
+            source_runtime_observer,
+            "greenhouse",
+            attempted=True,
+            zero_yield=len(greenhouse_verified) == 0,
+            yielded_results=len(greenhouse_verified),
+            fallback_used=greenhouse_fallback_used,
+            fallback_order=["structured_connector_poll", "scrape_parse_fallback"] if greenhouse_fallback_used else [],
+            status="jobs_returned" if greenhouse_verified else "empty_jobs",
+        )
+    if "ashby" in enabled_connectors and (settings.ashby_orgs or discovered_ashby_queries):
+        _record_source_runtime_observer(
+            source_runtime_observer,
+            "ashby",
+            attempted=True,
+            zero_yield=len(ashby_verified) == 0,
+            yielded_results=len(ashby_verified),
+            fallback_used=ashby_fallback_used,
+            fallback_order=["structured_connector_poll", "scrape_parse_fallback"] if ashby_fallback_used else [],
+            status="jobs_returned" if ashby_verified else "empty_jobs",
+        )
+
     for candidate, row, score, reasons in selected_discoveries:
         fallback_state = structured_fallback_state_by_key.get(row.discovery_key) or {}
         fallback_result_count = int(fallback_state.get("scrape_parse_recovered_result_count", 0) or 0)
@@ -2004,67 +2112,6 @@ def sync_all(
                 "result_count": result_count,
             },
         )
-    if "x_search" in enabled_connectors:
-        x_raw_signals, x_live, _ = run_connector_fetch(
-            session,
-            "x_search",
-            partial(x_connector.fetch, queries, "x_search" in strict_live_connectors),
-            date_fields=["published_at"],
-        )
-        _record_source_runtime_observer(
-            source_runtime_observer,
-            "x_search",
-            attempted=True,
-            zero_yield=len(x_raw_signals) == 0,
-            yielded_results=len(x_raw_signals),
-            status="signals_returned" if x_raw_signals else "empty_signals",
-        )
-
-    greenhouse_normalized = [normalize_greenhouse_job(job) for job in greenhouse_jobs]
-    greenhouse_verified = [record for record in (verify_listing(record) for record in greenhouse_normalized if _verify_listing_record(record)) if record is not None]
-    cycle_metrics["agent_discovered_listings_count"] += sum(
-        1
-        for record in greenhouse_normalized
-        if (record.metadata_json or {}).get("surface_provenance") in {"discovered_existing", "discovered_new"}
-    )
-    cycle_metrics["agent_discovered_verified_listings_count"] += sum(
-        1
-        for record in greenhouse_verified
-        if (record.metadata_json or {}).get("surface_provenance") in {"discovered_existing", "discovered_new"}
-    )
-    discovery_metrics["greenhouse"] = {
-        "raw": len(greenhouse_jobs),
-        "normalized": len(greenhouse_normalized),
-        "verified": len(greenhouse_verified),
-    }
-    logger.info(
-        "[VERIFICATION] connector=greenhouse before=%s after=%s",
-        len(greenhouse_normalized),
-        len(greenhouse_verified),
-    )
-
-    ashby_normalized = [normalize_ashby_job(job, job.get("companyName")) for job in ashby_jobs]
-    ashby_verified = [record for record in (verify_listing(record) for record in ashby_normalized if _verify_listing_record(record)) if record is not None]
-    cycle_metrics["agent_discovered_listings_count"] += sum(
-        1
-        for record in ashby_normalized
-        if (record.metadata_json or {}).get("surface_provenance") in {"discovered_existing", "discovered_new"}
-    )
-    cycle_metrics["agent_discovered_verified_listings_count"] += sum(
-        1
-        for record in ashby_verified
-        if (record.metadata_json or {}).get("surface_provenance") in {"discovered_existing", "discovered_new"}
-    )
-    discovery_metrics["ashby"] = {
-        "raw": len(ashby_jobs),
-        "normalized": len(ashby_normalized),
-        "verified": len(ashby_verified),
-    }
-    logger.info(
-        "[VERIFICATION] connector=ashby before=%s after=%s",
-        len(ashby_normalized),
-        len(ashby_verified),
-    )
 
     yc_jobs_normalized = [normalize_yc_job(job) for job in yc_jobs]
     yc_jobs_verified = [record for record in (verify_listing(record) for record in yc_jobs_normalized if _verify_listing_record(record)) if record is not None]
