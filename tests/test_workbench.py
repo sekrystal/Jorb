@@ -10,6 +10,7 @@ from services.profile_ingest import build_profile_review_rows
 from ui import app as ui_app
 from ui.components import sidebar as sidebar_component
 from ui.app import filter_and_sort_table
+from ui.components.job_card import build_job_card_markup
 from ui.screens.jobs import (
     build_job_view_model,
     build_jobs_empty_state_view_model,
@@ -706,6 +707,67 @@ def test_build_job_view_model_exposes_explicit_source_and_provenance_fields() ->
     assert job["source"] == "yc_jobs"
     assert job["source_provenance"] == "yc_jobs+search_web"
     assert job["tags"] == ["fresh", "strong fit", "high", "onsite"]
+
+
+def test_build_job_card_markup_matches_figma_hierarchy_without_diagnostics() -> None:
+    markup = build_job_card_markup(
+        {
+            "id": "19",
+            "title": "Founding Operations Lead",
+            "company": "Acme",
+            "location": "San Francisco, CA",
+            "work_mode": "onsite",
+            "description": "Lead founder operations and recruiting systems across the business.",
+            "match_score_display": "8.1",
+            "match_label": "Strong Match",
+            "explanation": "Strong overlap with operating cadence and systems ownership.",
+            "tags": ["fresh", "strong fit", "high", "onsite"],
+            "posted_date": "2026-03-24T12:00:00Z",
+            "salary": "$180k-$210k",
+            "source": "yc_jobs",
+            "state": "saved",
+            "source_provenance": "yc_jobs+search_web",
+        },
+        selected=True,
+    )
+
+    assert 'class="jorb-job-title"' in markup
+    assert "Founding Operations Lead" in markup
+    assert "Acme" in markup
+    assert "San Francisco, CA" in markup
+    assert "Why this matches" in markup
+    assert "Strong overlap with operating cadence and systems ownership." in markup
+    assert "Saved" in markup
+    assert "yc_jobs+search_web" not in markup
+    for prohibited in ["discovery", "autonomy", "connectors", "source matrix"]:
+        assert prohibited not in markup.lower()
+
+
+def test_build_job_card_markup_hides_new_state_badge_and_escapes_content() -> None:
+    markup = build_job_card_markup(
+        {
+            "id": "20",
+            "title": "Chief <Ops>",
+            "company": "North & South",
+            "location": "Remote - US",
+            "work_mode": "remote",
+            "description": "Own <systems> and planning.",
+            "match_score_display": "7.4",
+            "match_label": "Medium Match",
+            "explanation": "Fits & scales quickly.",
+            "tags": ["fresh"],
+            "posted_date": "2026-03-24T12:00:00Z",
+            "source": "greenhouse",
+            "state": "new",
+        },
+        selected=False,
+    )
+
+    assert "Chief &lt;Ops&gt;" in markup
+    assert "North &amp; South" in markup
+    assert "Own &lt;systems&gt; and planning." in markup
+    assert "Fits &amp; scales quickly." in markup
+    assert 'class="jorb-job-state' not in markup
 
 
 def test_jobs_backend_gap_frame_flattens_missing_fields() -> None:
