@@ -23,7 +23,7 @@ def build_search_state_view_model(search_run: dict[str, Any] | None) -> dict[str
         return {
             "tone": "info",
             "title": "Search has not run yet.",
-            "detail": "Run a refresh to load jobs into this view.",
+            "detail": "Run a manual search to load jobs into this view.",
         }
 
     status = str(search_run.get("status") or "").strip().lower()
@@ -66,6 +66,21 @@ def build_search_state_view_model(search_run: dict[str, Any] | None) -> dict[str
             f"across {query_count} quer{'y' if query_count == 1 else 'ies'} at {created_label}."
         ),
     }
+
+
+def build_manual_search_feedback(sync_result: dict[str, Any]) -> dict[str, str]:
+    surfaced_count = int(sync_result.get("surfaced_count") or 0)
+    summary = str(sync_result.get("discovery_summary") or "").strip()
+    if surfaced_count > 0:
+        tone = "success"
+    elif summary:
+        tone = "warning"
+    else:
+        tone = "info"
+    message = f"Manual search finished. Surfaced {surfaced_count} job{'s' if surfaced_count != 1 else ''}."
+    if summary:
+        message = f"{message} {summary}"
+    return {"tone": tone, "message": message}
 
 
 def render_search_status_region(search_run: dict[str, Any] | None, *, visible_job_count: int) -> None:
@@ -394,6 +409,7 @@ def render_jobs_screen(
     title: str,
     empty_message: str,
     last_updated: datetime | None,
+    run_manual_search_fn: Callable[[], dict[str, Any]] | None = None,
     send_feedback_fn: Callable[[int, str], None],
 ) -> None:
     jobs = [build_job_view_model(lead) for lead in leads]
@@ -406,7 +422,24 @@ def render_jobs_screen(
     gap_frame = jobs_backend_gap_frame(filtered_jobs)
     st.markdown(f"### {title}")
     if title == "Jobs":
+        feedback_key = f"jobs-manual-search-feedback-{page_key}"
+        feedback = st.session_state.pop(feedback_key, None)
+        if isinstance(feedback, dict):
+            tone = str(feedback.get("tone") or "info")
+            message = str(feedback.get("message") or "").strip()
+            if message:
+                getattr(st, tone if tone in {"success", "warning", "info", "error"} else "info")(message)
         render_search_status_region(search_run, visible_job_count=len(filtered_jobs))
+        if run_manual_search_fn is not None and st.button("Run manual search", key=f"jobs-manual-search-{page_key}"):
+            try:
+                with st.spinner("Running manual search..."):
+                    result = run_manual_search_fn()
+            except Exception as exc:
+                st.error(f"Manual search failed: {exc}")
+            else:
+                st.session_state[feedback_key] = build_manual_search_feedback(result)
+                st.session_state[f"jobs-last-updated-{page_key}"] = datetime.now(timezone.utc)
+                st.rerun()
     if not gap_frame.empty:
         with st.expander("Backend/UI field gaps", expanded=False):
             st.dataframe(gap_frame, use_container_width=True, hide_index=True)

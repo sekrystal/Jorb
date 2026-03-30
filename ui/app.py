@@ -460,6 +460,10 @@ def set_runtime_control(action: str) -> dict[str, Any]:
     return fetch_json("/runtime-control", method="POST", payload={"action": action})
 
 
+def run_manual_search() -> dict[str, Any]:
+    return fetch_json("/search-runs/manual", method="POST")
+
+
 def send_feedback(lead_id: int, action: str, pattern: Optional[str] = None) -> None:
     fetch_json("/feedback", method="POST", payload={"lead_id": lead_id, "action": action, "pattern": pattern})
 
@@ -1656,6 +1660,7 @@ def main() -> None:
             title="Jobs",
             empty_message="No matching jobs found. Try adjusting filters or wait for the next discovery cycle.",
             last_updated=datetime.now(),
+            run_manual_search_fn=run_manual_search,
             send_feedback_fn=send_feedback,
         )
         st.divider()

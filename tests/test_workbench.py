@@ -13,6 +13,7 @@ from ui.app import filter_and_sort_table
 from ui.screens.jobs import (
     build_job_view_model,
     build_jobs_empty_state_view_model,
+    build_manual_search_feedback,
     build_search_state_view_model,
     jobs_backend_gap_frame,
     render_search_status_region,
@@ -697,6 +698,14 @@ def test_build_search_state_view_model_reports_running_state() -> None:
     assert "current run finishes" in view_model["detail"]
 
 
+def test_build_search_state_view_model_reports_manual_trigger_when_no_run_exists() -> None:
+    view_model = build_search_state_view_model(None)
+
+    assert view_model["tone"] == "info"
+    assert view_model["title"] == "Search has not run yet."
+    assert view_model["detail"] == "Run a manual search to load jobs into this view."
+
+
 def test_build_search_state_view_model_reports_failure_state() -> None:
     view_model = build_search_state_view_model(
         {
@@ -785,6 +794,34 @@ def test_render_search_status_region_renders_inline_jobs_status(monkeypatch) -> 
     assert "Search finished successfully." in str(captured["markdown"])
     assert "The latest run found 5 jobs across 2 queries" in str(captured["markdown"])
     assert "3 jobs in view" in str(captured["markdown"])
+
+
+def test_build_manual_search_feedback_reports_surfaced_jobs() -> None:
+    feedback = build_manual_search_feedback(
+        {
+            "surfaced_count": 2,
+            "discovery_summary": "Jobs found and surfaced normally.",
+        }
+    )
+
+    assert feedback == {
+        "tone": "success",
+        "message": "Manual search finished. Surfaced 2 jobs. Jobs found and surfaced normally.",
+    }
+
+
+def test_build_manual_search_feedback_reports_zero_yield_summary() -> None:
+    feedback = build_manual_search_feedback(
+        {
+            "surfaced_count": 0,
+            "discovery_summary": "No jobs found from any connector.",
+        }
+    )
+
+    assert feedback == {
+        "tone": "warning",
+        "message": "Manual search finished. Surfaced 0 jobs. No jobs found from any connector.",
+    }
 
 
 def test_build_jobs_empty_state_view_model_reports_filter_hidden_results() -> None:

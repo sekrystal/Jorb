@@ -62,7 +62,7 @@ from services.runtime_control import get_runtime_control, runtime_control_payloa
 from services.sync import list_leads
 
 route_paths = {route.path for route in app.router.routes}
-for required in ["/health", "/runtime-control", "/autonomy-status", "/discovery-status", "/opportunities"]:
+for required in ["/health", "/runtime-control", "/autonomy-status", "/discovery-status", "/opportunities", "/search-runs/latest", "/search-runs/manual"]:
     if required not in route_paths:
         raise SystemExit(f"Missing expected route: {required}")
     print(required, "registered")

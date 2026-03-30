@@ -30,7 +30,7 @@ def build_session():
     return sessionmaker(bind=engine, expire_on_commit=False)()
 
 
-def get_json(path: str) -> tuple[int, dict[str, str], object]:
+def request_json(path: str, method: str = "GET") -> tuple[int, dict[str, str], object]:
     messages: list[dict[str, object]] = []
     body_sent = False
 
@@ -48,7 +48,7 @@ def get_json(path: str) -> tuple[int, dict[str, str], object]:
         "type": "http",
         "asgi": {"version": "3.0"},
         "http_version": "1.1",
-        "method": "GET",
+        "method": method,
         "scheme": "http",
         "path": path,
         "raw_path": path.encode("ascii"),
@@ -69,6 +69,10 @@ def get_json(path: str) -> tuple[int, dict[str, str], object]:
         if isinstance(key, bytes) and isinstance(value, bytes)
     }
     return int(start["status"]), headers, json.loads(payload) if payload else None
+
+
+def get_json(path: str) -> tuple[int, dict[str, str], object]:
+    return request_json(path, method="GET")
 
 
 def test_runtime_connector_set_respects_greenhouse_kill_switch() -> None:
@@ -138,9 +142,12 @@ def test_runtime_schema_creates_search_runs_table() -> None:
 
 def test_search_runs_latest_endpoint_is_registered() -> None:
     assert any(getattr(route, "path", None) == "/search-runs/latest" for route in app.routes)
+    assert any(getattr(route, "path", None) == "/search-runs/manual" for route in app.routes)
     schema = app.openapi()
     assert "/search-runs/latest" in schema["paths"]
     assert "get" in schema["paths"]["/search-runs/latest"]
+    assert "/search-runs/manual" in schema["paths"]
+    assert "post" in schema["paths"]["/search-runs/manual"]
 
 
 def test_search_runs_latest_endpoint_returns_null_when_no_runs_exist() -> None:
@@ -247,6 +254,54 @@ def test_search_runs_latest_http_endpoint_returns_latest_run_payload() -> None:
         "error": None,
         "diagnostics_json": {"status": "results"},
         "created_at": latest.created_at.isoformat().replace("+00:00", "Z"),
+    }
+
+
+def test_manual_search_http_endpoint_runs_sync_and_returns_payload(monkeypatch) -> None:
+    session = build_session()
+
+    def fake_sync_all(db, include_rechecks: bool):
+        assert db is session
+        assert include_rechecks is True
+        return {
+            "signals_ingested": 1,
+            "listings_ingested": 2,
+            "leads_created": 3,
+            "leads_updated": 4,
+            "rechecks_queued": 5,
+            "live_mode_used": False,
+            "discovery_metrics": {"search_web": {"raw": 2}},
+            "surfaced_count": 2,
+            "discovery_summary": "Manual search test summary.",
+            "discovery_status": {"selected_companies": ["Mercor"]},
+        }
+
+    def override_get_db():
+        try:
+            yield session
+        finally:
+            pass
+
+    monkeypatch.setattr("api.routes.search_runs.sync_all", fake_sync_all)
+    app.dependency_overrides[get_db] = override_get_db
+    try:
+        status_code, _headers, payload = request_json("/search-runs/manual", method="POST")
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+        session.close()
+
+    assert status_code == 200
+    assert payload == {
+        "signals_ingested": 1,
+        "listings_ingested": 2,
+        "leads_created": 3,
+        "leads_updated": 4,
+        "rechecks_queued": 5,
+        "live_mode_used": False,
+        "discovery_metrics": {"search_web": {"raw": 2}},
+        "surfaced_count": 2,
+        "discovery_summary": "Manual search test summary.",
+        "discovery_status": {"selected_companies": ["Mercor"]},
     }
 
 def test_alerts_record_greenhouse_incident_and_rate_limit() -> None:
