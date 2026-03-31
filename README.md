@@ -1,5 +1,7 @@
 # Jorb
 
+*Apologies for the AI slop content below, I'll make a human pass once I think this is ready for humans to use. *
+
 Jorb is a jobs-first opportunity intelligence workbench.
 
 It helps a single operator or candidate:
