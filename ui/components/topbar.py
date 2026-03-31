@@ -35,7 +35,7 @@ def build_jobs_page_header_copy(*, title: str) -> dict[str, str]:
         return {
             "eyebrow": "Workspace",
             "title": "Jobs",
-            "description": "Review ranked opportunities, narrow the list quickly, and open one clear detail view at a time.",
+            "description": "Set what you want, run discovery, and review ranked jobs with one clear detail view at a time.",
         }
     if normalized == "saved":
         return {
@@ -85,6 +85,7 @@ def render_jobs_topbar(
     default_location: str = "",
     default_remote_only: bool = False,
     default_sort: str = "Best Match",
+    refresh_label: str = "Refresh jobs",
 ) -> dict[str, Any]:
     search_key = f"jobs-search-{page_key}"
     location_key = f"jobs-location-{page_key}"
@@ -216,7 +217,7 @@ def render_jobs_topbar(
     location = row[1].text_input("Location", value=default_location, placeholder="Location", key=location_key)
     remote_only = row[2].toggle("Remote only", value=default_remote_only, key=remote_key)
     sort_by = row[3].selectbox("Sort", ["Best Match", "Newest"], index=0 if default_sort == "Best Match" else 1, key=sort_key)
-    refresh = row[4].button("Refresh Jobs", key=f"jobs-refresh-{page_key}", use_container_width=True)
+    refresh = row[4].button(refresh_label, key=f"jobs-refresh-{page_key}", use_container_width=True)
     st.markdown("</div>", unsafe_allow_html=True)
     return {
         "search": search,

@@ -120,6 +120,18 @@ Runtime smoke against a running stack:
 ./scripts/runtime_self_check.sh
 ```
 
+## Acceptance-Critical Validation
+
+Live runtime smoke proof is separate from local test success. Do not treat pytest, preflight, or compile success as enough for acceptance-critical product work.
+
+For product-facing changes, use `./scripts/runtime_self_check.sh` against a real running stack. This is the minimum proof for API, worker, and internal Streamlit harness validation, and product-facing shell work should also include direct UI proof such as:
+
+```bash
+PRIMARY_UI_URL=http://127.0.0.1:5173 ./scripts/runtime_self_check.sh
+```
+
+Acceptance-critical work must not be marked complete without it passing against a real running stack.
+
 ## How Jorb Works
 
 At a high level:

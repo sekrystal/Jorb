@@ -630,7 +630,7 @@ def test_ingest_user_job_link_flags_stale_records_in_verification_metadata() -> 
     assert listing.url == "https://www.workatastartup.com/jobs/12345"
     assert listing.freshness_days is not None and listing.freshness_days >= 14
     assert (listing.metadata_json or {})["verification"]["freshness_label"] == "stale"
-    assert listing.listing_status == "active"
+    assert listing.listing_status == "suspected_expired"
 
 
 def test_sync_all_surfaces_yc_jobs_listing_from_search_discovery(monkeypatch) -> None:

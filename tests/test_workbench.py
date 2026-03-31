@@ -247,7 +247,7 @@ def test_build_jobs_page_header_copy_describes_workspace_views() -> None:
     dismissed_copy = build_jobs_page_header_copy(title="Dismissed")
 
     assert jobs_copy["eyebrow"] == "Workspace"
-    assert "ranked opportunities" in jobs_copy["description"]
+    assert "set what you want" in jobs_copy["description"].lower()
     assert dismissed_copy["title"] == "Dismissed"
     assert "restore" in dismissed_copy["description"].lower()
 
@@ -583,7 +583,7 @@ def test_js_saved_and_applied_pages_use_shared_tracker_workspace() -> None:
 
 
 def test_streamlit_primary_navigation_keeps_product_pages_separate_from_operator_pages() -> None:
-    assert sidebar_component.PRIMARY_PAGES == ["Jobs", "Saved", "Applied", "Profile"]
+    assert sidebar_component.PRIMARY_PAGES == ["Jobs", "Saved", "Applied", "Dismissed", "Preferences"]
     assert sidebar_component.OPERATOR_PAGES == ["Discovery", "Agent Activity", "Investigations", "Learning", "Autonomy Ops"]
     assert not set(sidebar_component.PRIMARY_PAGES) & set(sidebar_component.OPERATOR_PAGES)
 
@@ -611,11 +611,11 @@ def test_streamlit_primary_shell_copy_avoids_internal_system_language() -> None:
     app_source = (REPO_ROOT / "ui/app.py").read_text()
     sidebar_source = (REPO_ROOT / "ui/components/sidebar.py").read_text()
 
-    assert 'Save profile and view jobs' in app_source
-    assert '#### Step 4: View jobs' in app_source
-    assert 'Continue in Jobs for ranked matches. Open Workspace tools if you want to inspect search coverage from this saved profile.' in app_source
-    assert 'Inspect what JORB stores locally for your profile, where it came from, and whether a category stays local or can support cloud-assisted matching.' in app_source
-    assert 'Ranked jobs matched to your profile.' in app_source
+    assert '#### Search setup' in app_source
+    assert 'Search setup saved. Jorb will use these preferences for discovery and ranking.' in app_source
+    assert 'Set what you want, review matched jobs, and act from one clear workspace.' in app_source
+    assert 'Inspect what JORB stores locally for your profile' not in app_source
+    assert 'Local network import' not in app_source
     assert 'No matching jobs found. Try adjusting filters or check back after the next refresh.' in app_source
     assert "Open workspace tools" in sidebar_source
     assert "Save profile and enter discovery" not in app_source
@@ -810,7 +810,7 @@ def test_build_job_view_model_marks_missing_fields_explicitly() -> None:
 
     assert "work_mode" in job["backend_gaps"]
     assert "description" in job["backend_gaps"]
-    assert job["location"] == "TODO location"
+    assert job["location"] == "Location not specified"
 
 
 def test_build_job_view_model_exposes_explicit_source_and_provenance_fields() -> None:
@@ -1520,12 +1520,12 @@ def test_filter_jobs_does_not_match_placeholder_todo_rows() -> None:
     jobs = [
         {
             "id": "1",
-            "title": "TODO title",
-            "company": "TODO company",
-            "location": "TODO location",
-            "work_mode": "TODO work mode",
-            "description": "TODO: backend did not return a short description.",
-            "explanation": "TODO: backend did not return a recommendation explanation.",
+            "title": "Untitled role",
+            "company": "Unknown company",
+            "location": "Location not specified",
+            "work_mode": "not specified",
+            "description": "Description unavailable from the source listing.",
+            "explanation": "Recommendation details unavailable.",
             "source": "unknown",
             "tags": [],
             "raw_lead": {"score_breakdown_json": {"final_score": 0.0}, "posted_at": None, "surfaced_at": None},
@@ -1538,6 +1538,33 @@ def test_filter_jobs_does_not_match_placeholder_todo_rows() -> None:
     )
 
     assert filtered == []
+
+
+def test_build_core_preferences_payload_syncs_titles_locations_and_work_mode() -> None:
+    payload = ui_app.build_core_preferences_payload(
+        {
+            "name": "Demo Candidate",
+            "preferred_titles_json": ["operator"],
+            "core_titles_json": ["operator"],
+            "target_roles_json": ["operator"],
+            "preferred_locations_json": ["remote"],
+            "preferred_domains_json": ["ai"],
+            "work_mode_preference": "unspecified",
+            "extracted_summary_json": {},
+        },
+        desired_titles="chief of staff, founding operations lead",
+        preferred_locations="remote, san francisco",
+        work_mode_preference="remote",
+        preferred_domains="ai, developer tools",
+    )
+
+    assert payload["preferred_titles_json"] == ["chief of staff", "founding operations lead"]
+    assert payload["core_titles_json"] == ["chief of staff", "founding operations lead"]
+    assert payload["target_roles_json"] == ["chief of staff", "founding operations lead"]
+    assert payload["preferred_locations_json"] == ["remote", "san francisco"]
+    assert payload["preferred_domains_json"] == ["ai", "developer tools"]
+    assert payload["work_mode_preference"] == "remote"
+    assert payload["extracted_summary_json"]["selected_target_role"] == "chief of staff"
 
 
 def test_build_jobs_empty_state_view_model_reports_running_search() -> None:

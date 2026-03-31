@@ -6,7 +6,7 @@ from typing import Any
 import streamlit as st
 
 
-PRIMARY_PAGES = ["Jobs", "Saved", "Applied", "Dismissed", "Profile"]
+PRIMARY_PAGES = ["Jobs", "Saved", "Applied", "Dismissed", "Preferences"]
 OPERATOR_PAGES = ["Discovery", "Agent Activity", "Investigations", "Learning", "Autonomy Ops"]
 
 

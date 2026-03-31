@@ -243,9 +243,9 @@ def _meta_span(value: str, *, extra_class: str = "") -> str:
 def build_job_card_markup(job: dict[str, Any], *, selected: bool) -> str:
     selected_class = " selected" if selected else ""
     card_class = f"jorb-job-card {escape(str(job.get('state', 'new')))}{selected_class}"
-    description = job.get("description") or "TODO: backend did not return a short description."
-    explanation = job.get("explanation") or "TODO: backend did not return a recommendation explanation."
-    work_mode = job.get("work_mode") or "TODO work mode"
+    description = job.get("description") or "Description unavailable from the source listing."
+    explanation = job.get("explanation") or "Recommendation details unavailable."
+    work_mode = job.get("work_mode") or "not specified"
     tags = "".join(
         f'<span class="jorb-job-tag">{escape(str(tag))}</span>'
         for tag in job.get("tags", [])[:4]
@@ -279,11 +279,11 @@ def build_job_card_markup(job: dict[str, Any], *, selected: bool) -> str:
           </div>
           <div class="jorb-job-header">
             <div class="jorb-job-title-block">
-              <div class="jorb-job-title">{escape(str(job.get("title") or "TODO title"))}</div>
+              <div class="jorb-job-title">{escape(str(job.get("title") or "Untitled role"))}</div>
               <div class="jorb-job-company-row">
-                <span class="jorb-job-company">{escape(str(job.get("company") or "TODO company"))}</span>
+                <span class="jorb-job-company">{escape(str(job.get("company") or "Unknown company"))}</span>
                 <span class="jorb-meta-sep">&bull;</span>
-                {_meta_span(str(job.get("location") or "TODO location"))}
+                {_meta_span(str(job.get("location") or "Location not specified"))}
               </div>
               <div class="jorb-job-submeta">
                 <span class="jorb-work-mode-pill {_work_mode_class(work_mode)}">{escape(work_mode)}</span>
@@ -291,7 +291,7 @@ def build_job_card_markup(job: dict[str, Any], *, selected: bool) -> str:
             </div>
             <div class="jorb-score-wrap">
               <div class="jorb-score {_score_class(str(job.get('match_label') or ''))}">{escape(str(job.get("match_score_display") or "n/a"))}</div>
-              <div class="jorb-score-label">{escape(str(job.get("match_label") or "TODO match label"))}</div>
+              <div class="jorb-score-label">{escape(str(job.get("match_label") or "Match pending"))}</div>
             </div>
           </div>
           <div class="jorb-job-section-label">Summary</div>

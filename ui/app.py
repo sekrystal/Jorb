@@ -350,6 +350,112 @@ def build_profile_persistence_payload(
     }
 
 
+def normalize_work_mode_choice(value: str) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized in {"remote", "hybrid", "onsite"}:
+        return normalized
+    return "unspecified"
+
+
+def build_core_preferences_payload(
+    profile: dict[str, Any],
+    *,
+    desired_titles: str,
+    preferred_locations: str,
+    work_mode_preference: str,
+    preferred_domains: str | None = None,
+) -> dict[str, Any]:
+    payload = build_profile_persistence_payload(profile)
+    titles = dedupe_preserving_order(parse_csv(desired_titles))
+    locations = dedupe_preserving_order(parse_csv(preferred_locations))
+    domains = dedupe_preserving_order(parse_csv(preferred_domains or ", ".join(profile.get("preferred_domains_json", []))))
+    summary = dict(payload.get("extracted_summary_json") or {})
+    if titles:
+        summary["selected_target_role"] = titles[0]
+    payload["extracted_summary_json"] = summary
+    payload["preferred_titles_json"] = titles
+    payload["core_titles_json"] = titles[:2]
+    payload["target_roles_json"] = titles[:4]
+    payload["preferred_locations_json"] = locations
+    payload["preferred_domains_json"] = domains
+    payload["work_mode_preference"] = normalize_work_mode_choice(work_mode_preference)
+    return payload
+
+
+def build_core_preferences_summary(profile: dict[str, Any]) -> dict[str, str]:
+    titles = profile.get("target_roles_json") or profile.get("preferred_titles_json") or profile.get("core_titles_json") or []
+    locations = profile.get("preferred_locations_json") or []
+    work_mode = normalize_work_mode_choice(profile.get("work_mode_preference", "unspecified"))
+    domains = profile.get("preferred_domains_json") or []
+    return {
+        "titles": ", ".join(titles[:3]) or "No target titles set yet",
+        "locations": ", ".join(locations[:3]) or "No location preferences set yet",
+        "work_mode": work_mode.replace("unspecified", "Any work mode").title() if work_mode != "unspecified" else "Any work mode",
+        "domains": ", ".join(domains[:3]) or "Any domain",
+    }
+
+
+def render_core_preferences_panel(profile: dict[str, Any]) -> None:
+    summary = build_core_preferences_summary(profile)
+    feedback = st.session_state.pop("jobs-preferences-feedback", None)
+    if isinstance(feedback, dict):
+        tone = str(feedback.get("tone") or "success")
+        message = str(feedback.get("message") or "").strip()
+        if message:
+            getattr(st, tone if tone in {"success", "warning", "info", "error"} else "info")(message)
+
+    with st.container(border=True):
+        st.markdown("#### Search setup")
+        st.caption("Tell Jorb what you want directly. These preferences shape discovery, matching, and ranking before the jobs list loads.")
+        chips = st.columns(4)
+        chips[0].metric("Titles", summary["titles"])
+        chips[1].metric("Locations", summary["locations"])
+        chips[2].metric("Work mode", summary["work_mode"])
+        chips[3].metric("Domains", summary["domains"])
+        with st.form("jobs-core-preferences-form"):
+            first_row = st.columns([2.1, 1.8, 1.1])
+            desired_titles = first_row[0].text_input(
+                "Desired titles",
+                value=", ".join(profile.get("target_roles_json") or profile.get("preferred_titles_json") or profile.get("core_titles_json") or []),
+                placeholder="Chief of Staff, Founding Operations Lead",
+            )
+            preferred_locations = first_row[1].text_input(
+                "Location preferences",
+                value=", ".join(profile.get("preferred_locations_json") or []),
+                placeholder="Remote, San Francisco, New York",
+            )
+            work_mode_options = ["Any", "Remote", "Hybrid", "Onsite"]
+            current_work_mode = normalize_work_mode_choice(profile.get("work_mode_preference", "unspecified"))
+            work_mode_index = {
+                "unspecified": 0,
+                "remote": 1,
+                "hybrid": 2,
+                "onsite": 3,
+            }.get(current_work_mode, 0)
+            work_mode = first_row[2].selectbox("Work mode", work_mode_options, index=work_mode_index)
+            second_row = st.columns([2.1, 1.2])
+            preferred_domains = second_row[0].text_input(
+                "Preferred domains",
+                value=", ".join(profile.get("preferred_domains_json") or []),
+                placeholder="AI, developer tools, fintech",
+            )
+            save_setup = second_row[1].form_submit_button("Save setup", use_container_width=True)
+            if save_setup:
+                payload = build_core_preferences_payload(
+                    profile,
+                    desired_titles=desired_titles,
+                    preferred_locations=preferred_locations,
+                    work_mode_preference=work_mode.lower(),
+                    preferred_domains=preferred_domains,
+                )
+                fetch_json("/candidate-profile", method="POST", payload=payload)
+                st.session_state["jobs-preferences-feedback"] = {
+                    "tone": "success",
+                    "message": "Search setup saved. Jorb will use these preferences for discovery and ranking.",
+                }
+                st.rerun()
+
+
 def referral_matches_for_lead(lead: dict[str, Any], profile: dict[str, Any], limit: int = 3) -> list[dict[str, Any]]:
     network_payload = extract_network_import(profile.get("extracted_summary_json"))
     return match_referral_paths(lead.get("company_name") or "", network_payload, limit=limit)
@@ -1161,248 +1267,80 @@ def render_user_job_link_form() -> None:
 
 
 def render_profile_tab(profile: dict[str, Any], learning: dict[str, Any]) -> None:
-    st.subheader("Onboarding")
-    st.caption("Upload or paste a resume, review the extracted profile fields, and pick a target role to improve matching.")
+    del learning
+    st.subheader("Preferences")
+    st.caption("Keep this page focused on what improves job matches now: direct search preferences plus optional resume enrichment.")
+
+    render_core_preferences_panel(profile)
+
     latest_resume_ingest = st.session_state.get("latest_resume_ingest")
-    draft_profile = st.session_state.get("onboarding_profile_draft")
-    onboarding_deferred = bool(st.session_state.get(ONBOARDING_DEFERRED_STATE_KEY, False))
-    onboarding_state = build_onboarding_state(profile, latest_resume_ingest, draft_profile, onboarding_deferred=onboarding_deferred)
-    render_onboarding_progress(onboarding_state)
-    contract = build_resume_analysis_contract_view_model()
-    st.info(contract["summary"])
-    st.caption("Analyzer does: " + " | ".join(contract["does"]))
-    st.caption("Current limits: " + " | ".join(contract["does_not"]))
-
     resume_feedback = st.session_state.get("resume-analysis-feedback")
-    if isinstance(resume_feedback, dict):
-        tone = str(resume_feedback.get("tone") or "info")
-        message = str(resume_feedback.get("message") or "").strip()
-        if message:
-            getattr(st, tone if tone in {"success", "warning", "info", "error"} else "info")(message)
+    contract = build_resume_analysis_contract_view_model()
 
-    if onboarding_state["current_step"] == "discovery" and onboarding_state["onboarding_deferred"] and not onboarding_state["resume_complete"]:
-        st.info("Setup deferred. Use Jobs, Saved, or Applied to validate the real-job path first, then return here when you want to refine the profile.")
-        if st.button("Resume optional setup", use_container_width=True):
-            st.session_state[ONBOARDING_DEFERRED_STATE_KEY] = False
-            st.rerun()
-    elif not onboarding_state["resume_complete"]:
-        st.caption("Resume upload is optional. You can browse jobs without it, but extracted profile fields usually improve match quality.")
-        if st.button("Skip setup for now", use_container_width=True):
-            st.session_state[ONBOARDING_DEFERRED_STATE_KEY] = True
-            st.rerun()
+    with st.expander("Optional resume upload", expanded=latest_resume_ingest is not None):
+        st.caption("Upload or paste a resume if you want Jorb to extract titles, domains, skills, and competencies to improve matching.")
+        st.caption("Analyzer does: " + " | ".join(contract["does"]))
+        st.caption("Current limits: " + " | ".join(contract["does_not"]))
+        if isinstance(resume_feedback, dict):
+            tone = str(resume_feedback.get("tone") or "info")
+            message = str(resume_feedback.get("message") or "").strip()
+            if message:
+                getattr(st, tone if tone in {"success", "warning", "info", "error"} else "info")(message)
 
-    st.markdown("#### Step 1: Upload resume")
-    upload = st.file_uploader("Upload resume PDF, TXT, or MD", type=["pdf", "txt", "md"])
-    pasted_resume = st.text_area("Paste resume text", height=120)
-    if st.button("Parse resume", use_container_width=True):
-        try:
-            with st.spinner("Analyzing and saving resume..."):
-                if upload is not None:
-                    preview = preview_resume_upload(upload.name, upload.getvalue())
-                    response = fetch_json("/resume", method="POST", payload={"filename": upload.name, "raw_text": preview["raw_text"]})
-                elif pasted_resume.strip():
-                    preview = preview_resume_text("pasted_resume.txt", pasted_resume.strip())
-                    response = fetch_json("/resume", method="POST", payload={"filename": "pasted_resume.txt", "raw_text": preview["raw_text"]})
-                else:
-                    st.warning("Upload a resume or paste text first.")
-                    return
-            st.session_state["latest_resume_ingest"] = {
-                "filename": preview["filename"],
-                "status": preview["status"],
-                "warnings": [*preview["warnings"], *response.get("warnings", [])],
-                "missing_fields": preview["missing_fields"],
-                "matched_terms": preview["matched_terms"],
-                "text_preview": preview["text_preview"],
-                "candidate_profile": response.get("candidate_profile", preview["candidate_profile"]),
-            }
-            st.session_state["resume-analysis-feedback"] = build_resume_analysis_feedback(preview, response)
-            st.session_state[ONBOARDING_DEFERRED_STATE_KEY] = False
-            st.session_state.pop("onboarding_profile_draft", None)
-            st.rerun()
-        except Exception as exc:
-            st.session_state["resume-analysis-feedback"] = build_resume_failure_feedback(exc)
-            st.rerun()
+        upload = st.file_uploader("Upload resume PDF, TXT, or MD", type=["pdf", "txt", "md"])
+        pasted_resume = st.text_area("Paste resume text", height=120)
+        if st.button("Analyze resume", use_container_width=True):
+            try:
+                with st.spinner("Analyzing and saving resume..."):
+                    if upload is not None:
+                        preview = preview_resume_upload(upload.name, upload.getvalue())
+                        response = fetch_json("/resume", method="POST", payload={"filename": upload.name, "raw_text": preview["raw_text"]})
+                    elif pasted_resume.strip():
+                        preview = preview_resume_text("pasted_resume.txt", pasted_resume.strip())
+                        response = fetch_json("/resume", method="POST", payload={"filename": "pasted_resume.txt", "raw_text": preview["raw_text"]})
+                    else:
+                        st.warning("Upload a resume or paste text first.")
+                        return
+                st.session_state["latest_resume_ingest"] = {
+                    "filename": preview["filename"],
+                    "status": preview["status"],
+                    "warnings": [*preview["warnings"], *response.get("warnings", [])],
+                    "missing_fields": preview["missing_fields"],
+                    "matched_terms": preview["matched_terms"],
+                    "text_preview": preview["text_preview"],
+                    "candidate_profile": response.get("candidate_profile", preview["candidate_profile"]),
+                }
+                st.session_state["resume-analysis-feedback"] = build_resume_analysis_feedback(preview, response)
+                st.rerun()
+            except Exception as exc:
+                st.session_state["resume-analysis-feedback"] = build_resume_failure_feedback(exc)
+                st.rerun()
 
-    review_profile = draft_profile or get_profile_form_source(profile, latest_resume_ingest)
+        if latest_resume_ingest:
+            st.markdown("#### Latest extraction")
+            st.caption(f"Source: {latest_resume_ingest['filename']} | Status: {latest_resume_ingest['status']}")
+            matched_terms = latest_resume_ingest.get("matched_terms") or {}
+            extraction_summary = st.columns(4)
+            extraction_summary[0].metric("Titles found", len(matched_terms.get("preferred_titles") or []))
+            extraction_summary[1].metric("Domains found", len(matched_terms.get("preferred_domains") or []))
+            extraction_summary[2].metric("Skills found", len(matched_terms.get("confirmed_skills") or []))
+            extraction_summary[3].metric("Competencies found", len(matched_terms.get("competencies") or []))
+            for warning in latest_resume_ingest["warnings"]:
+                st.info(warning)
+            if latest_resume_ingest["missing_fields"]:
+                st.caption("Needs review: " + ", ".join(latest_resume_ingest["missing_fields"]))
+            for field_name, terms in matched_terms.items():
+                if terms:
+                    st.caption(f"{field_name.replace('_', ' ').title()}: {', '.join(terms)}")
+            if latest_resume_ingest.get("text_preview"):
+                st.code(latest_resume_ingest["text_preview"], language="text")
+
+    review_profile = get_profile_form_source(profile, latest_resume_ingest)
     review_rows = build_profile_review_rows(review_profile)
-
-    if latest_resume_ingest:
-        st.markdown("#### Latest extraction")
-        st.caption(f"Source: {latest_resume_ingest['filename']} | Status: {latest_resume_ingest['status']}")
-        matched_terms = latest_resume_ingest.get("matched_terms") or {}
-        extraction_summary = st.columns(4)
-        extraction_summary[0].metric("Titles found", len(matched_terms.get("preferred_titles") or []))
-        extraction_summary[1].metric("Domains found", len(matched_terms.get("preferred_domains") or []))
-        extraction_summary[2].metric("Skills found", len(matched_terms.get("confirmed_skills") or []))
-        extraction_summary[3].metric("Competencies found", len(matched_terms.get("competencies") or []))
-        for warning in latest_resume_ingest["warnings"]:
-            st.info(warning)
-        if latest_resume_ingest["missing_fields"]:
-            st.caption("Needs review: " + ", ".join(latest_resume_ingest["missing_fields"]))
-        for field_name, terms in matched_terms.items():
-            if terms:
-                st.caption(f"{field_name.replace('_', ' ').title()}: {', '.join(terms)}")
-        if latest_resume_ingest.get("text_preview"):
-            st.code(latest_resume_ingest["text_preview"], language="text")
-
     if review_rows:
-        st.markdown("#### Extracted profile fields")
-        st.dataframe(pd.DataFrame(review_rows), use_container_width=True, hide_index=True)
-
-    if onboarding_state["resume_complete"]:
-        st.markdown("#### Step 2: Review profile")
-        with st.form("profile-form"):
-            name = st.text_input("Profile name", value=review_profile.get("name", "Demo Candidate"))
-            preferred_titles = st.text_input("Preferred titles", value=", ".join(review_profile.get("preferred_titles_json", [])))
-            core_titles = st.text_input("Core titles", value=", ".join(review_profile.get("core_titles_json", [])))
-            adjacent_titles = st.text_input("Adjacent titles", value=", ".join(review_profile.get("adjacent_titles_json", [])))
-            excluded_titles = st.text_input("Excluded titles", value=", ".join(review_profile.get("excluded_titles_json", [])))
-            preferred_domains = st.text_input("Preferred domains", value=", ".join(review_profile.get("preferred_domains_json", [])))
-            preferred_locations = st.text_input("Preferred locations", value=", ".join(review_profile.get("preferred_locations_json", [])))
-            excluded_companies = st.text_input("Excluded companies", value=", ".join(review_profile.get("excluded_companies_json", [])))
-            confirmed_skills = st.text_input("Confirmed skills", value=", ".join(review_profile.get("confirmed_skills_json", [])))
-            competencies = st.text_input("Competencies", value=", ".join(review_profile.get("competencies_json", [])))
-            explicit_preferences = st.text_input("Explicit preferences", value=", ".join(review_profile.get("explicit_preferences_json", [])))
-            st.caption("Confirmed skills and competencies increase match quality when they appear in job titles or descriptions.")
-            stage_preferences = st.text_input("Preferred stages", value=", ".join(review_profile.get("stage_preferences_json", [])))
-            stretch_role_families = st.text_input("Stretch role families", value=", ".join(review_profile.get("stretch_role_families_json", [])))
-            excluded_keywords = st.text_input("Excluded keywords", value=", ".join(review_profile.get("excluded_keywords_json", [])))
-            minimum_fit_threshold = st.number_input(
-                "Minimum fit threshold",
-                min_value=0.0,
-                max_value=5.0,
-                step=0.1,
-                value=float(review_profile.get("minimum_fit_threshold", 2.8)),
-            )
-            bands = ["entry", "junior", "mid", "senior", "staff", "executive"]
-            min_seniority_value = review_profile.get("min_seniority_band", "mid")
-            max_seniority_value = review_profile.get("max_seniority_band", "senior")
-            min_seniority = st.selectbox("Min seniority", bands, index=bands.index(min_seniority_value if min_seniority_value in bands else "mid"))
-            max_seniority = st.selectbox("Max seniority", bands, index=bands.index(max_seniority_value if max_seniority_value in bands else "senior"))
-            if st.form_submit_button("Continue to target role", use_container_width=True):
-                st.session_state[ONBOARDING_DEFERRED_STATE_KEY] = False
-                st.session_state["onboarding_profile_draft"] = build_profile_update_payload(
-                    profile,
-                    review_profile,
-                    {
-                        "name": name,
-                        "preferred_titles": preferred_titles,
-                        "adjacent_titles": adjacent_titles,
-                        "excluded_titles": excluded_titles,
-                        "preferred_domains": preferred_domains,
-                        "excluded_companies": excluded_companies,
-                        "preferred_locations": preferred_locations,
-                        "confirmed_skills": confirmed_skills,
-                        "competencies": competencies,
-                        "explicit_preferences": explicit_preferences,
-                        "stage_preferences": stage_preferences,
-                        "core_titles": core_titles,
-                        "excluded_keywords": excluded_keywords,
-                        "min_seniority_band": min_seniority,
-                        "max_seniority_band": max_seniority,
-                        "stretch_role_families": stretch_role_families,
-                        "minimum_fit_threshold": minimum_fit_threshold,
-                    },
-                )
-                st.rerun()
-
-    if draft_profile:
-        st.markdown("#### Step 3: Pick target role")
-        target_role_options = build_target_role_options(draft_profile)
-        default_target_role = (draft_profile.get("core_titles_json") or draft_profile.get("preferred_titles_json") or [""])[0]
-        default_index = target_role_options.index(default_target_role) if default_target_role in target_role_options else 0
-        with st.form("target-role-form"):
-            target_role = st.selectbox("Target role", target_role_options, index=default_index)
-            custom_target_role = st.text_input("Or enter a custom target role", value="")
-            st.caption(
-                "This selection becomes the first preferred and core title used for profile-aware search and fit scoring."
-            )
-            if st.form_submit_button("Save profile and view jobs", use_container_width=True):
-                selected_target_role = custom_target_role.strip() or target_role
-                payload = apply_target_role_selection(draft_profile, selected_target_role)
-                fetch_json("/candidate-profile", method="POST", payload=payload)
-                st.session_state["last_onboarding_target_role"] = selected_target_role
-                st.session_state[ONBOARDING_DEFERRED_STATE_KEY] = False
-                st.session_state.pop("latest_resume_ingest", None)
-                st.session_state.pop("onboarding_profile_draft", None)
-                st.rerun()
-
-    if onboarding_state["current_step"] == "discovery":
-        st.markdown("#### Step 4: View jobs")
-        selected_target_role = (profile.get("extracted_summary_json") or {}).get("selected_target_role") or st.session_state.get("last_onboarding_target_role")
-        if selected_target_role:
-            st.success(f"Target role saved: {selected_target_role}")
-        st.caption(
-            "Continue in Jobs for ranked matches. Open Workspace tools if you want to inspect search coverage from this saved profile."
-        )
-
-    st.markdown("#### Local network import")
-    st.caption("Import LinkedIn export or network CSV locally to suggest referral paths. JORB does not generate outreach.")
-    network_upload = st.file_uploader("Upload network CSV", type=["csv"], key="network-import-upload")
-    pasted_network_csv = st.text_area("Or paste network CSV", height=120, key="network-import-text")
-    if st.button("Import network data", use_container_width=True):
-        try:
-            if network_upload is not None:
-                imported_network = parse_network_csv(network_upload.name, network_upload.getvalue().decode("utf-8", errors="ignore"))
-            elif pasted_network_csv.strip():
-                imported_network = parse_network_csv("pasted_network.csv", pasted_network_csv.strip())
-            else:
-                st.warning("Upload a CSV or paste CSV text first.")
-                return
-            extracted_summary = attach_network_import(profile.get("extracted_summary_json"), imported_network)
-            fetch_json("/candidate-profile", method="POST", payload=build_profile_persistence_payload(profile, extracted_summary_json=extracted_summary))
-            st.session_state["latest_network_import"] = imported_network
-            st.rerun()
-        except Exception as exc:
-            st.error(f"Network import failed: {exc}")
-
-    network_payload = extract_network_import(profile.get("extracted_summary_json"))
-    if network_payload.get("contacts"):
-        import_summary = network_payload.get("import_summary") or {}
-        cols = st.columns(2)
-        cols[0].metric("Imported contacts", import_summary.get("contact_count", 0))
-        cols[1].metric("Indexed companies", import_summary.get("indexed_company_count", 0))
-        st.caption(network_payload.get("guidance") or "Local referral suggestions only.")
-        contacts_df = pd.DataFrame(network_payload["contacts"])
-        if not contacts_df.empty:
-            visible_columns = [column for column in ["name", "company", "title", "relationship", "location", "profile_url", "notes"] if column in contacts_df.columns]
-            st.dataframe(
-                contacts_df[visible_columns],
-                use_container_width=True,
-                hide_index=True,
-                column_config={"profile_url": st.column_config.LinkColumn("Profile", display_text="open", validate="^https?://")},
-            )
-
-    st.markdown("#### Privacy and local data inventory")
-    st.caption(
-        "Inspect what JORB stores locally for your profile, where it came from, and whether a category stays local or can support cloud-assisted matching."
-    )
-    inventory_frame = profile_inventory_frame(profile)
-    inventory_export = profile_inventory_export(profile)
-    inventory_summary = st.columns(3)
-    inventory_summary[0].metric("Stored categories", inventory_export["summary"]["stored_categories"])
-    inventory_summary[1].metric("Local only", inventory_export["summary"]["local_only_categories"])
-    inventory_summary[2].metric("Cloud assisted", inventory_export["summary"]["cloud_assisted_categories"])
-    if not inventory_frame.empty:
-        st.dataframe(inventory_frame, use_container_width=True, hide_index=True)
-    st.download_button(
-        "Export inventory JSON",
-        data=json.dumps(inventory_export, indent=2),
-        file_name="jorb-profile-data-inventory.json",
-        mime="application/json",
-        use_container_width=True,
-    )
-
-    st.caption(f"Profile schema: {profile.get('profile_schema_version', 'v1')}")
-    st.caption(profile.get("extracted_summary_json", {}).get("summary", "No profile summary yet."))
-    learning_df = pd.DataFrame(
-        {
-            "boosted_titles": [", ".join(learning.get("boosted_titles", [])) or ""],
-            "boosted_domains": [", ".join(learning.get("boosted_domains", [])) or ""],
-            "generated_queries": [", ".join(learning.get("generated_queries", [])) or ""],
-        }
-    )
-    st.dataframe(learning_df, use_container_width=True, hide_index=True)
+        with st.expander("Match details", expanded=False):
+            st.caption("These structured fields improve matching when they are present in job titles or descriptions.")
+            st.dataframe(pd.DataFrame(review_rows), use_container_width=True, hide_index=True)
 
 
 def render_agent_activity_tab() -> None:
@@ -1776,7 +1714,7 @@ def main() -> None:
             set_operator_console(False)
             st.rerun()
     else:
-        st.caption("Ranked jobs matched to your profile.")
+        st.caption("Set what you want, review matched jobs, and act from one clear workspace.")
         primary_page, open_operator_console = render_sidebar(stats=stats, runtime=runtime, health=health)
         if open_operator_console:
             set_operator_console(True)
@@ -1796,6 +1734,12 @@ def main() -> None:
         return
 
     if primary_page == "Jobs":
+        try:
+            profile = fetch_json("/candidate-profile")
+        except requests.RequestException:
+            st.error("Backend unavailable. Start FastAPI first, then refresh.")
+            st.stop()
+        render_core_preferences_panel(profile)
         jobs_payload = fetch_leads_payload_for_view(
             page_key="jobs",
             freshness_days=14,
@@ -1815,6 +1759,7 @@ def main() -> None:
             last_updated=st.session_state.get("jobs-last-updated-jobs"),
             run_manual_search_fn=run_manual_search,
             send_feedback_fn=send_feedback,
+            refresh_label="Find jobs now",
         )
         st.divider()
         with st.expander("Add a job link", expanded=False):
@@ -1876,7 +1821,7 @@ def main() -> None:
             dismiss_label="Restore",
             intro_message="Dismissed jobs stay hidden from Jobs, Saved, and Applied until you restore them here.",
         )
-    elif primary_page == "Profile":
+    elif primary_page == "Preferences":
         try:
             profile = fetch_json("/candidate-profile")
             learning = fetch_json("/profile-learning")

@@ -414,7 +414,7 @@ def _description_from_evidence(evidence: dict[str, Any]) -> tuple[str, bool]:
     if snippets:
         compact = " ".join(snippets)
         return compact[:240] + ("..." if len(compact) > 240 else ""), False
-    return "TODO: backend did not return a short description.", True
+    return "Description unavailable from the source listing.", True
 
 
 def _full_description_from_evidence(evidence: dict[str, Any]) -> tuple[str, bool]:
@@ -424,10 +424,19 @@ def _full_description_from_evidence(evidence: dict[str, Any]) -> tuple[str, bool
     snippets = [snippet.strip() for snippet in (evidence.get("snippets") or []) if snippet and snippet.strip()]
     if snippets:
         return "\n\n".join(snippets), False
-    return "TODO: backend did not return a full description.", True
+    return "Full description unavailable from the source listing.", True
 
 
 def _work_mode_from_evidence(evidence: dict[str, Any]) -> tuple[str, bool]:
+    listing_metadata = evidence.get("listing_metadata_json") or {}
+    explicit_work_mode = str(
+        evidence.get("work_mode")
+        or listing_metadata.get("work_mode")
+        or listing_metadata.get("work_mode_preference")
+        or ""
+    ).strip().lower()
+    if explicit_work_mode in {"remote", "hybrid", "onsite"}:
+        return explicit_work_mode, False
     location = (evidence.get("location") or "").strip().lower()
     location_scope = (evidence.get("location_scope") or "").strip().lower()
     if "remote" in location or location_scope.startswith("remote"):
@@ -436,7 +445,7 @@ def _work_mode_from_evidence(evidence: dict[str, Any]) -> tuple[str, bool]:
         return "hybrid", False
     if location:
         return "onsite", False
-    return "TODO work mode", True
+    return "not specified", True
 
 
 def _source_fields(lead: dict[str, Any], evidence: dict[str, Any]) -> tuple[str, str]:
@@ -445,7 +454,7 @@ def _source_fields(lead: dict[str, Any], evidence: dict[str, Any]) -> tuple[str,
         or evidence.get("source_type")
         or lead.get("source_platform")
         or evidence.get("source_platform")
-        or "unknown"
+        or "Unknown source"
     )
     provenance = (
         lead.get("source_lineage")
@@ -507,9 +516,9 @@ def build_job_view_model(lead: dict[str, Any]) -> dict[str, Any]:
     view_model = {
         "id": str(lead["id"]),
         "lead_id": lead["id"],
-        "title": lead.get("primary_title") or "TODO title",
-        "company": lead.get("company_name") or "TODO company",
-        "location": evidence.get("location") or "TODO location",
+        "title": lead.get("primary_title") or "Untitled role",
+        "company": lead.get("company_name") or "Unknown company",
+        "location": evidence.get("location") or "Location not specified",
         "work_mode": work_mode,
         "description": description,
         "full_description": full_description,
@@ -527,7 +536,7 @@ def build_job_view_model(lead: dict[str, Any]) -> dict[str, Any]:
         "state": state,
         "why_this_job": decision_explanation,
         "what_you_are_missing": ", ".join(missing_signals[:3]) if missing_signals else None,
-        "suggested_next_steps": score_payload.get("action_explanation") or "TODO: backend did not return suggested next steps.",
+        "suggested_next_steps": score_payload.get("action_explanation") or "Open the source and decide whether to save, dismiss, or apply.",
         "url": lead.get("url"),
         "backend_gaps": gaps,
         "top_matching_signals": top_matching_signals,
@@ -576,8 +585,8 @@ def build_job_detail_panel_markup(job: dict[str, Any]) -> str:
     sections = [
         ("Recommendation summary", job.get("explanation") or "No recommendation summary recorded."),
         ("Why this job", job.get("why_this_job") or "No detailed rationale recorded."),
-        ("What you are missing", job.get("what_you_are_missing") or "No explicit gap recorded."),
-        ("Suggested next steps", job.get("suggested_next_steps") or "No suggested next steps recorded."),
+        ("What you are missing", job.get("what_you_are_missing") or "No major gaps flagged."),
+        ("Suggested next steps", job.get("suggested_next_steps") or "Open the source and decide whether to save, dismiss, or apply."),
         ("Full description", job.get("full_description") or "No full description available."),
     ]
     sections_markup = "".join(
@@ -889,10 +898,11 @@ def render_jobs_screen(
     dismiss_action: str = "dislike",
     dismiss_label: str = "Dismiss",
     intro_message: str | None = None,
+    refresh_label: str = "Refresh jobs",
 ) -> None:
     jobs = [build_job_view_model(lead) for lead in leads]
     jobs_by_id = {job["id"]: job for job in jobs}
-    filters = render_jobs_topbar(page_key=page_key, last_updated=last_updated, title=title)
+    filters = render_jobs_topbar(page_key=page_key, last_updated=last_updated, title=title, refresh_label=refresh_label)
     if filters["refresh"]:
         if title == "Jobs" and run_manual_search_fn is not None:
             feedback_key = f"jobs-manual-search-feedback-{page_key}"
