@@ -18,6 +18,9 @@ def build_profile_review_rows(profile: dict[str, Any]) -> list[dict[str, str]]:
         {"field": "Preferred locations", "value": _csv(targeting.get("preferred_locations") or profile.get("preferred_locations_json"))},
         {"field": "Target roles", "value": _csv(targeting.get("target_roles") or profile.get("target_roles_json"))},
         {"field": "Work mode", "value": str(targeting.get("work_mode_preference") or profile.get("work_mode_preference") or "")},
+        {"field": "Confirmed skills", "value": _csv(targeting.get("confirmed_skills") or profile.get("confirmed_skills_json"))},
+        {"field": "Competencies", "value": _csv(targeting.get("competencies") or profile.get("competencies_json"))},
+        {"field": "Explicit preferences", "value": _csv(targeting.get("explicit_preferences") or profile.get("explicit_preferences_json"))},
         {"field": "Preferred stages", "value": _csv(targeting.get("stage_preferences") or profile.get("stage_preferences_json"))},
         {"field": "Excluded keywords", "value": _csv(targeting.get("excluded_keywords") or profile.get("excluded_keywords_json"))},
         {"field": "Stretch role families", "value": _csv(targeting.get("stretch_role_families") or profile.get("stretch_role_families_json"))},
@@ -37,8 +40,10 @@ def _csv(values: Any) -> str:
 
 def _seniority_value(seniority: dict[str, Any], profile: dict[str, Any]) -> str:
     guess = seniority.get("guess") or profile.get("seniority_guess") or ""
+    years = seniority.get("years_experience") or profile.get("years_experience") or ""
     minimum = seniority.get("minimum_band") or profile.get("min_seniority_band") or ""
     maximum = seniority.get("maximum_band") or profile.get("max_seniority_band") or ""
-    if not any([guess, minimum, maximum]):
+    if not any([guess, years, minimum, maximum]):
         return ""
-    return f"{guess or 'unknown'} ({minimum or 'n/a'} to {maximum or 'n/a'})"
+    years_prefix = f"{years}+ years, " if years else ""
+    return f"{years_prefix}{guess or 'unknown'} ({minimum or 'n/a'} to {maximum or 'n/a'})"

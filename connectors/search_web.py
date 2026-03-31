@@ -219,6 +219,7 @@ class DirectJobExtractionResult:
     company_name: str
     location: Optional[str] = None
     description_text: Optional[str] = None
+    description_html: Optional[str] = None
     apply_url: Optional[str] = None
     posted_at: Optional[str] = None
     page_title: str = ""
@@ -788,6 +789,7 @@ def extract_direct_listing_from_html(
             company_name=str(company_name).strip(),
             location=_coerce_location_text(job_posting),
             description_text=_clean_html(str(job_posting.get("description") or "")),
+            description_html=str(job_posting.get("description") or ""),
             apply_url=str(apply_url).strip() if apply_url else normalized_url,
             posted_at=job_posting.get("datePosted"),
             page_title=page_title,

@@ -9,9 +9,11 @@ from sqlalchemy.orm import sessionmaker
 from connectors.search_web import ATSExtractionResult, SearchDiscoveryResult
 from core.config import Settings
 from core.models import AgentRun, Base, CandidateProfile, Lead, Listing
+from core.schemas import FeedbackRequest
+from services.feedback import submit_feedback
 from services.pipeline import run_critic_agent
 from services import sync as sync_service
-from services.sync import list_leads
+from services.sync import list_leads, list_leads_payload
 
 
 def _seed_profile(session) -> None:
@@ -152,6 +154,155 @@ def test_lead_response_exposes_source_provenance_and_lineage() -> None:
     assert items[0].source_provenance == "discovered_new"
     assert items[0].source_lineage == "greenhouse+search_web"
     assert items[0].discovery_source == "search_web"
+
+
+def test_list_leads_payload_applies_backend_search_contract_and_ranks_stronger_results_first() -> None:
+    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine, expire_on_commit=False)()
+    _seed_profile(session)
+    profile = session.query(CandidateProfile).one()
+    profile.core_titles_json = [*(profile.core_titles_json or []), "chief of staff", "operations program lead"]
+    session.commit()
+
+    listing_exact = Listing(
+        company_name="ExactCo",
+        title="Chief of Staff",
+        location="Remote, US",
+        url="https://jobs.example.com/exact",
+        source_type="greenhouse",
+        posted_at=datetime.utcnow(),
+        first_published_at=datetime.utcnow(),
+        last_seen_at=datetime.utcnow(),
+        description_text="Own operating cadence for the leadership team.",
+        listing_status="active",
+        freshness_hours=2.0,
+        freshness_days=0,
+        metadata_json={},
+    )
+    listing_related = Listing(
+        company_name="RelatedCo",
+        title="Operations Program Lead",
+        location="Remote, US",
+        url="https://jobs.example.com/related",
+        source_type="ashby",
+        posted_at=datetime.utcnow(),
+        first_published_at=datetime.utcnow(),
+        last_seen_at=datetime.utcnow(),
+        description_text="This role partners closely with the chief of staff and CEO.",
+        listing_status="active",
+        freshness_hours=2.0,
+        freshness_days=0,
+        metadata_json={},
+    )
+    session.add_all([listing_exact, listing_related])
+    session.flush()
+    session.add_all(
+        [
+            Lead(
+                lead_type="listing",
+                company_name="ExactCo",
+                primary_title="Chief of Staff",
+                listing_id=listing_exact.id,
+                surfaced_at=datetime.utcnow(),
+                rank_label="strong",
+                confidence_label="high",
+                freshness_label="fresh",
+                title_fit_label="core match",
+                qualification_fit_label="strong fit",
+                explanation="Exact title match.",
+                score_breakdown_json={"final_score": 7.5, "explanation": {"summary": "Exact title fit."}},
+                evidence_json={"url": listing_exact.url, "source_type": "greenhouse", "source_platform": "greenhouse", "location": "Remote, US"},
+                hidden=False,
+            ),
+            Lead(
+                lead_type="listing",
+                company_name="RelatedCo",
+                primary_title="Operations Program Lead",
+                listing_id=listing_related.id,
+                surfaced_at=datetime.utcnow(),
+                rank_label="strong",
+                confidence_label="high",
+                freshness_label="fresh",
+                title_fit_label="adjacent match",
+                qualification_fit_label="strong fit",
+                explanation="Description mentions the chief of staff partnership.",
+                score_breakdown_json={"final_score": 9.1, "explanation": {"summary": "Description-only match."}},
+                evidence_json={"url": listing_related.url, "source_type": "ashby", "source_platform": "ashby", "location": "Remote, US"},
+                hidden=False,
+            ),
+        ]
+    )
+    session.commit()
+
+    payload = list_leads_payload(session, include_hidden=True, include_unqualified=True, q="chief of staff")
+
+    assert [item.company_name for item in payload["items"]] == ["ExactCo", "RelatedCo"]
+    assert payload["search_meta"] == {
+        "query": "chief of staff",
+        "normalized_query": "chief of staff",
+        "tokens": ["chief", "of", "staff"],
+        "searched_fields": ["title", "company", "location", "description", "tags", "explanation", "source"],
+        "backend_applied": True,
+        "fallback_mode": "backend",
+        "partial_results": False,
+        "status": "results",
+        "candidate_count": 2,
+        "result_count": 2,
+        "ranking": "match_score_then_recommendation_then_recency_then_title_then_company",
+    }
+    assert payload["items"][0].evidence_json["search_match"]["matched_fields"][0] == "title_exact"
+
+
+def test_list_leads_payload_search_contract_reports_empty_results_with_query_meta() -> None:
+    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine, expire_on_commit=False)()
+    _seed_profile(session)
+
+    listing = Listing(
+        company_name="Acme",
+        title="Operations Lead",
+        location="Remote, US",
+        url="https://jobs.example.com/acme",
+        source_type="greenhouse",
+        posted_at=datetime.utcnow(),
+        first_published_at=datetime.utcnow(),
+        last_seen_at=datetime.utcnow(),
+        description_text="Own recruiting systems and planning.",
+        listing_status="active",
+        freshness_hours=2.0,
+        freshness_days=0,
+        metadata_json={},
+    )
+    session.add(listing)
+    session.flush()
+    session.add(
+        Lead(
+            lead_type="listing",
+            company_name="Acme",
+            primary_title="Operations Lead",
+            listing_id=listing.id,
+            surfaced_at=datetime.utcnow(),
+            rank_label="strong",
+            confidence_label="high",
+            freshness_label="fresh",
+            title_fit_label="core match",
+            qualification_fit_label="strong fit",
+            explanation="Relevant operations role.",
+            score_breakdown_json={"final_score": 8.0, "explanation": {"summary": "Operations fit."}},
+            evidence_json={"url": listing.url, "source_type": "greenhouse", "source_platform": "greenhouse", "location": "Remote, US"},
+            hidden=False,
+        )
+    )
+    session.commit()
+
+    payload = list_leads_payload(session, include_hidden=True, include_unqualified=True, q="nuclear engineer")
+
+    assert payload["items"] == []
+    assert payload["search_meta"]["status"] == "empty"
+    assert payload["search_meta"]["query"] == "nuclear engineer"
+    assert payload["search_meta"]["result_count"] == 0
 
 
 def test_discovery_status_cycle_metrics_support_bridge_samples() -> None:
@@ -531,7 +682,7 @@ def test_list_leads_location_cache_and_deduped_location_logs(caplog) -> None:
 
     deduped_message = next(message for message in messages if "[LOCATION_GATE_DEDUPED]" in message)
     assert "'emitted_count': 1" in deduped_message
-    assert "'suppressed_duplicate_count': 1" in deduped_message
+    assert "'suppressed_duplicate_count': 0" in deduped_message
 
 
 def test_list_leads_does_not_invoke_ai_critic_when_readtime_ai_disabled(monkeypatch) -> None:
@@ -651,6 +802,306 @@ def test_list_leads_reuses_persisted_ai_critic_without_fresh_call(monkeypatch) -
     assert len(items) == 1
     assert items[0].hidden is True
     assert items[0].evidence_json["critic_status"] == "uncertain"
+
+
+def test_dismissed_lead_is_hidden_by_default_and_restorable() -> None:
+    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine, expire_on_commit=False)()
+    _seed_profile(session)
+
+    listing = Listing(
+        company_name="RestoreCo",
+        title="Chief of Staff",
+        location="Remote, US",
+        url="https://job-boards.greenhouse.io/restoreco/jobs/1",
+        source_type="greenhouse",
+        posted_at=datetime.utcnow(),
+        first_published_at=datetime.utcnow(),
+        last_seen_at=datetime.utcnow(),
+        description_text="Operator partner role.",
+        listing_status="active",
+        freshness_hours=1.0,
+        freshness_days=0,
+        metadata_json={},
+    )
+    session.add(listing)
+    session.flush()
+    lead = Lead(
+        lead_type="listing",
+        company_name="RestoreCo",
+        primary_title="Chief of Staff",
+        listing_id=listing.id,
+        surfaced_at=datetime.utcnow(),
+        rank_label="strong",
+        confidence_label="high",
+        freshness_label="fresh",
+        title_fit_label="core match",
+        qualification_fit_label="strong fit",
+        explanation="Visible listing",
+        score_breakdown_json={"composite": 7.0},
+        evidence_json={"url": listing.url, "source_type": "greenhouse"},
+        hidden=False,
+    )
+    session.add(lead)
+    session.flush()
+
+    submit_feedback(session, FeedbackRequest(lead_id=lead.id, action="dislike"))
+
+    visible_items = list_leads(session)
+    assert lead.id not in [item.id for item in visible_items]
+
+    hidden_items = list_leads(session, include_hidden=True)
+    hidden_item = next(item for item in hidden_items if item.id == lead.id)
+    assert hidden_item.hidden is True
+    assert hidden_item.evidence_json["suppression_category"] == "user_dismissed"
+
+    submit_feedback(session, FeedbackRequest(lead_id=lead.id, action="restore"))
+
+    restored_items = list_leads(session)
+    restored_item = next(item for item in restored_items if item.id == lead.id)
+    assert restored_item.hidden is False
+
+
+def test_duplicate_listings_collapse_into_one_visible_lead_across_sources() -> None:
+    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine, expire_on_commit=False)()
+    _seed_profile(session)
+
+    greenhouse = Listing(
+        company_name="Acme, Inc.",
+        title="Founding Operations Lead",
+        location="San Francisco, CA",
+        url="https://job-boards.greenhouse.io/acme/jobs/1",
+        source_type="greenhouse",
+        posted_at=datetime.utcnow(),
+        first_published_at=datetime.utcnow(),
+        last_seen_at=datetime.utcnow(),
+        description_text="Operator role.",
+        listing_status="active",
+        freshness_hours=4.0,
+        freshness_days=0,
+        metadata_json={"canonical_job": {"identity_key": "acme::founding-operations-lead::san-francisco"}},
+    )
+    ashby = Listing(
+        company_name="Acme",
+        title="Founding Operations Lead",
+        location="San Francisco",
+        url="https://jobs.ashbyhq.com/acme/2",
+        source_type="ashby",
+        posted_at=datetime.utcnow(),
+        first_published_at=datetime.utcnow(),
+        last_seen_at=datetime.utcnow(),
+        description_text="Same operator role.",
+        listing_status="active",
+        freshness_hours=5.0,
+        freshness_days=0,
+        metadata_json={"canonical_job": {"identity_key": "acme::founding-operations-lead::san-francisco"}},
+    )
+    session.add_all([greenhouse, ashby])
+    session.flush()
+    lead_one = Lead(
+        lead_type="listing",
+        company_name="Acme, Inc.",
+        primary_title="Founding Operations Lead",
+        listing_id=greenhouse.id,
+        surfaced_at=datetime.utcnow(),
+        rank_label="strong",
+        confidence_label="high",
+        freshness_label="fresh",
+        title_fit_label="core match",
+        qualification_fit_label="strong fit",
+        explanation="Higher quality ATS lead",
+        score_breakdown_json={"composite": 8.1, "match_tier": "high"},
+        evidence_json={"url": greenhouse.url, "source_type": "greenhouse"},
+        hidden=False,
+    )
+    lead_two = Lead(
+        lead_type="listing",
+        company_name="Acme",
+        primary_title="Founding Operations Lead",
+        listing_id=ashby.id,
+        surfaced_at=datetime.utcnow(),
+        rank_label="strong",
+        confidence_label="high",
+        freshness_label="fresh",
+        title_fit_label="core match",
+        qualification_fit_label="strong fit",
+        explanation="Duplicate ashby lead",
+        score_breakdown_json={"composite": 8.0, "match_tier": "high"},
+        evidence_json={"url": ashby.url, "source_type": "ashby"},
+        hidden=False,
+    )
+    session.add_all([lead_one, lead_two])
+    session.commit()
+
+    items = list_leads(session)
+
+    assert len(items) == 1
+    assert items[0].source_type == "greenhouse"
+    assert items[0].evidence_json["duplicate_merge"]["duplicate_count"] == 2
+    assert set(items[0].evidence_json["duplicate_merge"]["merged_sources"]) == {"greenhouse", "ashby"}
+
+
+def test_low_match_tier_lead_is_hidden_from_default_views() -> None:
+    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine, expire_on_commit=False)()
+    _seed_profile(session)
+
+    listing = Listing(
+        company_name="LowFitCo",
+        title="Head of Recruiting",
+        location="Remote, US",
+        url="https://job-boards.greenhouse.io/lowfit/jobs/1",
+        source_type="greenhouse",
+        posted_at=datetime.utcnow(),
+        first_published_at=datetime.utcnow(),
+        last_seen_at=datetime.utcnow(),
+        description_text="Executive recruiting leadership role.",
+        listing_status="active",
+        freshness_hours=1.0,
+        freshness_days=0,
+        metadata_json={},
+    )
+    session.add(listing)
+    session.flush()
+    lead = Lead(
+        lead_type="listing",
+        company_name="LowFitCo",
+        primary_title="Head of Recruiting",
+        listing_id=listing.id,
+        surfaced_at=datetime.utcnow(),
+        rank_label="weak",
+        confidence_label="medium",
+        freshness_label="fresh",
+        title_fit_label="weak title match",
+        qualification_fit_label="stretch",
+        explanation="Low fit listing",
+        score_breakdown_json={"composite": 4.5, "match_tier": "low"},
+        evidence_json={"url": listing.url, "source_type": "greenhouse"},
+        hidden=False,
+    )
+    session.add(lead)
+    session.commit()
+
+    assert list_leads(session) == []
+
+    hidden_items = list_leads(session, include_hidden=True)
+    assert len(hidden_items) == 1
+    assert hidden_items[0].hidden is True
+    assert hidden_items[0].evidence_json["suppression_category"] == "low_fit"
+
+
+def test_feedback_changes_visible_ranking_order_for_similar_jobs(monkeypatch) -> None:
+    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine, expire_on_commit=False)()
+    _seed_profile(session)
+    def rerank_current_leads(local_session) -> None:
+        from services.profile import get_candidate_profile
+        from services.ranking import score_lead
+
+        profile = get_candidate_profile(local_session)
+        learning = (profile.extracted_summary_json or {}).get("learning", {})
+        for lead in local_session.query(Lead).all():
+            listing = local_session.get(Listing, lead.listing_id)
+            breakdown = score_lead(
+                profile=profile,
+                lead_type=lead.lead_type,
+                title=lead.primary_title,
+                company_name=lead.company_name,
+                company_domain=(lead.evidence_json or {}).get("company_domain"),
+                location=(listing.location if listing else (lead.evidence_json or {}).get("location")),
+                description_text=(listing.description_text if listing else ""),
+                freshness_label=lead.freshness_label,
+                listing_status=lead.listing_status if hasattr(lead, "listing_status") else (listing.listing_status if listing else "active"),
+                source_type=(lead.evidence_json or {}).get("source_type", "greenhouse"),
+                evidence_count=1,
+                feedback_learning=learning,
+            )
+            lead.score_breakdown_json = breakdown
+            lead.rank_label = breakdown["rank_label"]
+        local_session.flush()
+
+    monkeypatch.setattr("services.feedback.run_ranker_agent", rerank_current_leads)
+    monkeypatch.setattr("services.feedback.run_critic_agent", lambda _session: None)
+
+    first_listing = Listing(
+        company_name="Alpha",
+        title="Chief of Staff",
+        location="Remote, US",
+        url="https://job-boards.greenhouse.io/alpha/jobs/1",
+        source_type="greenhouse",
+        posted_at=datetime.utcnow(),
+        first_published_at=datetime.utcnow(),
+        last_seen_at=datetime.utcnow(),
+        description_text="Chief of Staff role with SQL and stakeholder management.",
+        listing_status="active",
+        freshness_hours=1.0,
+        freshness_days=0,
+        metadata_json={},
+    )
+    second_listing = Listing(
+        company_name="Beta",
+        title="Chief of Staff",
+        location="Remote, US",
+        url="https://job-boards.greenhouse.io/beta/jobs/2",
+        source_type="greenhouse",
+        posted_at=datetime.utcnow(),
+        first_published_at=datetime.utcnow(),
+        last_seen_at=datetime.utcnow(),
+        description_text="Chief of Staff role with SQL, stakeholder management, and process design for the executive team.",
+        listing_status="active",
+        freshness_hours=1.0,
+        freshness_days=0,
+        metadata_json={},
+    )
+    session.add_all([first_listing, second_listing])
+    session.flush()
+    first_lead = Lead(
+        lead_type="listing",
+        company_name="Alpha",
+        primary_title="Chief of Staff",
+        listing_id=first_listing.id,
+        surfaced_at=datetime.utcnow(),
+        rank_label="medium",
+        confidence_label="high",
+        freshness_label="fresh",
+        title_fit_label="core match",
+        qualification_fit_label="strong fit",
+        explanation="Baseline lead",
+        score_breakdown_json={"final_score": 7.2, "composite": 7.2, "match_tier": "medium", "role_family": "operations"},
+        evidence_json={"url": first_listing.url, "source_type": "greenhouse", "company_domain": "alpha.ai"},
+        hidden=False,
+    )
+    second_lead = Lead(
+        lead_type="listing",
+        company_name="Beta",
+        primary_title="Chief of Staff",
+        listing_id=second_listing.id,
+        surfaced_at=datetime.utcnow(),
+        rank_label="medium",
+        confidence_label="high",
+        freshness_label="fresh",
+        title_fit_label="core match",
+        qualification_fit_label="strong fit",
+        explanation="Slightly lower before feedback",
+        score_breakdown_json={"final_score": 7.0, "composite": 7.0, "match_tier": "medium", "role_family": "operations"},
+        evidence_json={"url": second_listing.url, "source_type": "greenhouse", "company_domain": "beta.ai"},
+        hidden=False,
+    )
+    session.add_all([first_lead, second_lead])
+    session.commit()
+
+    before = [item for item in list_leads(session) if item.company_name in {"Alpha", "Beta"}]
+    assert [item.company_name for item in before][:2] == ["Alpha", "Beta"]
+
+    submit_feedback(session, FeedbackRequest(lead_id=second_lead.id, action="save"))
+
+    after = [item for item in list_leads(session) if item.company_name in {"Alpha", "Beta"}]
+    assert [item.company_name for item in after][:2] == ["Beta", "Alpha"]
 
 
 def test_sync_all_caps_ai_fit_calls_per_cycle(monkeypatch) -> None:

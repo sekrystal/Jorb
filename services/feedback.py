@@ -6,12 +6,35 @@ from sqlalchemy.orm import Session
 from core.config import get_settings
 from core.models import CandidateProfile, Feedback, Lead, SourceQuery
 from core.schemas import FeedbackRequest
+from core.time import utcnow
 from services.activity import append_lead_agent_trace, log_agent_activity
 from services.applications import mark_applied, save_for_later
 from services.learning import add_watchlist_item, increment_query_stat, mark_query_status
 from services.pipeline import run_critic_agent, run_ranker_agent
 from services.profile import get_candidate_profile
 from services.query_learning import generate_queries_from_preferences, upsert_generated_queries
+
+
+def _dismiss_lead(lead: Lead, *, reason: str) -> None:
+    evidence = dict(lead.evidence_json or {})
+    evidence["user_dismissed_at"] = utcnow().isoformat()
+    evidence["user_hidden_reason"] = reason
+    lead.evidence_json = evidence
+    lead.hidden = True
+
+
+def _restore_lead(lead: Lead) -> None:
+    evidence = dict(lead.evidence_json or {})
+    evidence.pop("user_dismissed_at", None)
+    evidence.pop("user_hidden_reason", None)
+    lead.evidence_json = evidence
+    lead.hidden = False
+
+
+def _mark_seen(lead: Lead) -> None:
+    evidence = dict(lead.evidence_json or {})
+    evidence.setdefault("user_seen_at", utcnow().isoformat())
+    lead.evidence_json = evidence
 
 
 def _get_learning(profile: CandidateProfile) -> dict:
@@ -25,7 +48,32 @@ def _get_learning(profile: CandidateProfile) -> dict:
     learning.setdefault("location_penalties", {})
     learning.setdefault("generated_queries", [])
     learning.setdefault("feedback_notes", [])
+    learning.setdefault("feedback_events", [])
     return learning
+
+
+def _append_feedback_event(
+    learning: dict,
+    *,
+    action: str,
+    lead: Lead,
+    company_domain: str,
+    role_family: str,
+    source_type: str,
+) -> None:
+    events = list(learning.get("feedback_events", []))
+    events.append(
+        {
+            "at": utcnow().isoformat(),
+            "action": action,
+            "title": lead.primary_title,
+            "company_name": lead.company_name,
+            "company_domain": company_domain or "",
+            "role_family": role_family,
+            "source_type": source_type,
+        }
+    )
+    learning["feedback_events"] = events[-40:]
 
 
 def _persist_learning(profile: CandidateProfile, learning: dict) -> None:
@@ -74,6 +122,8 @@ def submit_feedback(session: Session, request: FeedbackRequest) -> Feedback:
         delta = 1.2 if request.action == "applied" else 0.8 if request.action == "more_like_this" else 0.6
         title_weights[lead.primary_title.lower()] = round(title_weights.get(lead.primary_title.lower(), 0.0) + delta, 2)
         role_family_weights[role_family] = round(role_family_weights.get(role_family, 0.0) + (0.8 if request.action == "applied" else 0.5), 2)
+        if lead.company_name:
+            company_penalties[lead.company_name.lower()] = round(company_penalties.get(lead.company_name.lower(), 0.0) - (0.7 if request.action == "applied" else 0.45), 2)
         if company_domain:
             domain_weights[company_domain.lower()] = round(domain_weights.get(company_domain.lower(), 0.0) + 0.5, 2)
             add_watchlist_item(
@@ -101,16 +151,42 @@ def submit_feedback(session: Session, request: FeedbackRequest) -> Feedback:
             save_for_later(session, lead)
         elif request.action == "applied":
             mark_applied(session, lead)
+        _append_feedback_event(
+            learning,
+            action=request.action,
+            lead=lead,
+            company_domain=company_domain,
+            role_family=role_family,
+            source_type=source_type,
+        )
     elif request.action in {"dislike", "wrong_function", "too_senior", "too_junior", "wrong_geography"}:
         title_weights[lead.primary_title.lower()] = round(title_weights.get(lead.primary_title.lower(), 0.0) - 0.6, 2)
         role_family_weights[role_family] = round(role_family_weights.get(role_family, 0.0) - 0.4, 2)
         source_penalties[source_type] = round(source_penalties.get(source_type, 0.0) + 0.4, 2)
+        company_penalties[lead.company_name.lower()] = round(company_penalties.get(lead.company_name.lower(), 0.0) + (0.9 if request.action == "dislike" else 0.4), 2)
+        if company_domain:
+            domain_weights[company_domain.lower()] = round(domain_weights.get(company_domain.lower(), 0.0) - 0.35, 2)
         if request.action == "wrong_geography":
             location_penalties[location_scope] = round(location_penalties.get(location_scope, 0.0) + 0.8, 2)
         feedback_notes.append(f"{request.action} reduced similar sourcing from {source_type}")
         _update_source_query_stats(session, query_texts, "dislikes")
         for query_text in query_texts:
             mark_query_status(session, query_text=query_text, source_type="x", status="suppressed")
+        if request.action == "dislike":
+            _dismiss_lead(lead, reason="Dismissed from jobs list")
+        _append_feedback_event(
+            learning,
+            action=request.action,
+            lead=lead,
+            company_domain=company_domain,
+            role_family=role_family,
+            source_type=source_type,
+        )
+    elif request.action == "seen":
+        _mark_seen(lead)
+    elif request.action == "restore":
+        _restore_lead(lead)
+        feedback_notes.append(f"restored {lead.company_name} / {lead.primary_title} to active views")
     elif request.action == "irrelevant_company":
         company_penalties[lead.company_name.lower()] = round(company_penalties.get(lead.company_name.lower(), 0.0) + 1.2, 2)
         source_penalties[source_type] = round(source_penalties.get(source_type, 0.0) + 0.2, 2)

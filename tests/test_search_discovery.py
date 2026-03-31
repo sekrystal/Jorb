@@ -158,6 +158,7 @@ def test_extract_direct_listing_from_yc_jobs_html() -> None:
     assert extraction.company_name == "Acme"
     assert extraction.title == "Founding Operations Lead"
     assert extraction.location == "San Francisco, CA, US"
+    assert extraction.description_html == "<p>Lead operating cadence and recruiting systems.</p>"
 
 
 def test_surface_acceptance_reason_rejects_duckduckgo_self_links() -> None:

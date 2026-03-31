@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from core.schemas import ListingRecord
+from services.job_content import clean_job_content
 from services.location_policy import classify_location_scope
 
 
@@ -50,6 +51,12 @@ def normalize_greenhouse_job(job: dict) -> ListingRecord:
     first_published_at = _parse_datetime(job.get("first_published"))
     created_at = _parse_datetime(job.get("created_at"))
     updated_at = _parse_datetime(job.get("updated_at"))
+    cleaned_content = clean_job_content(
+        source_type="greenhouse",
+        raw_text=content,
+        raw_html=content,
+        page_text=job.get("page_text", ""),
+    )
     return _build_listing_record(
         company_name=job.get("company_name"),
         company_domain=job.get("company_domain"),
@@ -60,10 +67,14 @@ def normalize_greenhouse_job(job: dict) -> ListingRecord:
         source_type="greenhouse",
         posted_at=first_published_at or created_at or updated_at,
         first_published_at=first_published_at,
-        description_text=content,
+        description_text=cleaned_content["canonical_text"],
         metadata_json={
             "provider": "greenhouse",
-            "page_text": job.get("page_text", ""),
+            "page_text": cleaned_content["plain_text"],
+            "raw_page_text": job.get("page_text", ""),
+            "description_sections": cleaned_content["sections"],
+            "description_summary": cleaned_content["summary"],
+            "description_source_format": cleaned_content["source_format"],
             "source_queries": job.get("source_queries", []),
             "discovery_source": job.get("discovery_source"),
             "surface_provenance": job.get("surface_provenance"),
@@ -88,6 +99,12 @@ def normalize_ashby_job(job: dict, org_name: Optional[str] = None) -> ListingRec
     location_classification = classify_location_scope(location)
     published_at = _parse_datetime(job.get("publishedDate"))
     updated_at = _parse_datetime(job.get("updatedAt"))
+    cleaned_content = clean_job_content(
+        source_type="ashby",
+        raw_text=job.get("descriptionPlain") or description,
+        raw_html=job.get("descriptionHtml"),
+        page_text=job.get("page_text", ""),
+    )
 
     return _build_listing_record(
         company_name=job.get("companyName") or org_name,
@@ -99,10 +116,14 @@ def normalize_ashby_job(job: dict, org_name: Optional[str] = None) -> ListingRec
         source_type="ashby",
         posted_at=published_at or updated_at,
         first_published_at=published_at,
-        description_text=description,
+        description_text=cleaned_content["canonical_text"],
         metadata_json={
             "provider": "ashby",
-            "page_text": job.get("page_text", ""),
+            "page_text": cleaned_content["plain_text"],
+            "raw_page_text": job.get("page_text", ""),
+            "description_sections": cleaned_content["sections"],
+            "description_summary": cleaned_content["summary"],
+            "description_source_format": cleaned_content["source_format"],
             "source_queries": job.get("source_queries", []),
             "discovery_source": job.get("discovery_source"),
             "surface_provenance": job.get("surface_provenance"),
@@ -121,6 +142,12 @@ def normalize_yc_job(job: dict) -> ListingRecord:
     location = job.get("location")
     location_classification = classify_location_scope(location)
     posted_at = _parse_datetime(job.get("posted_at"))
+    cleaned_content = clean_job_content(
+        source_type="yc_jobs",
+        raw_text=job.get("description_text"),
+        raw_html=job.get("description_html"),
+        page_text=job.get("page_text", ""),
+    )
 
     return _build_listing_record(
         company_name=job.get("company_name"),
@@ -132,10 +159,14 @@ def normalize_yc_job(job: dict) -> ListingRecord:
         source_type="yc_jobs",
         posted_at=posted_at,
         first_published_at=posted_at,
-        description_text=job.get("description_text"),
+        description_text=cleaned_content["canonical_text"],
         metadata_json={
             "provider": "yc_jobs",
-            "page_text": job.get("description_text", ""),
+            "page_text": cleaned_content["plain_text"],
+            "raw_page_text": job.get("page_text", ""),
+            "description_sections": cleaned_content["sections"],
+            "description_summary": cleaned_content["summary"],
+            "description_source_format": cleaned_content["source_format"],
             "source_queries": job.get("source_queries", []),
             "discovery_source": job.get("discovery_source"),
             "surface_provenance": job.get("surface_provenance"),

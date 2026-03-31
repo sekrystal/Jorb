@@ -29,6 +29,9 @@ def preview_resume_text(filename: str, raw_text: str, warnings: list[str] | None
     matched_domains = _match_known_terms(cleaned_text, KNOWN_DOMAINS)
     matched_locations = _match_known_terms(cleaned_text, KNOWN_LOCATIONS)
     matched_stages = _match_known_terms(cleaned_text, KNOWN_STAGES)
+    matched_skills = parsed["confirmed_skills_json"]
+    matched_competencies = parsed["competencies_json"]
+    matched_preferences = parsed["explicit_preferences_json"]
 
     missing_fields: list[str] = []
     if not matched_titles:
@@ -49,6 +52,7 @@ def preview_resume_text(filename: str, raw_text: str, warnings: list[str] | None
         "resume_filename": filename,
         "extraction_status": "partial" if missing_fields else "complete",
         "missing_fields": missing_fields,
+        "years_experience": parsed.get("years_experience"),
     }
 
     payload = CandidateProfilePayload(
@@ -61,7 +65,13 @@ def preview_resume_text(filename: str, raw_text: str, warnings: list[str] | None
         excluded_titles_json=parsed["excluded_titles_json"],
         preferred_domains_json=parsed["preferred_domains_json"],
         preferred_locations_json=parsed["preferred_locations_json"],
+        target_roles_json=parsed["target_roles_json"],
+        work_mode_preference=parsed["work_mode_preference"],
+        confirmed_skills_json=parsed["confirmed_skills_json"],
+        competencies_json=parsed["competencies_json"],
+        explicit_preferences_json=parsed["explicit_preferences_json"],
         seniority_guess=parsed["seniority_guess"],
+        years_experience=parsed["years_experience"],
         stage_preferences_json=parsed["stage_preferences_json"],
         core_titles_json=parsed["core_titles_json"],
         excluded_keywords_json=parsed["excluded_keywords_json"],
@@ -82,6 +92,10 @@ def preview_resume_text(filename: str, raw_text: str, warnings: list[str] | None
             "preferred_domains": matched_domains,
             "preferred_locations": matched_locations,
             "stage_preferences": matched_stages,
+            "confirmed_skills": matched_skills,
+            "competencies": matched_competencies,
+            "explicit_preferences": matched_preferences,
+            "years_experience": parsed.get("years_experience"),
         },
         "candidate_profile": payload.model_dump(mode="json"),
     }

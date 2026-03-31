@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import re
 from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field
@@ -10,6 +11,8 @@ from pydantic import model_validator
 FeedbackAction = Literal[
     "like",
     "dislike",
+    "seen",
+    "restore",
     "save",
     "applied",
     "mute_company",
@@ -352,6 +355,10 @@ class CanonicalJobRecord(BaseModel):
     title: str
     location: str
     source_type: str
+    identity_key: str = ""
+    company_key: str = ""
+    role_key: str = ""
+    location_key: str = ""
 
 
 class ListingRecord(BaseModel):
@@ -377,6 +384,45 @@ class ListingRecord(BaseModel):
 
     @model_validator(mode="after")
     def normalize_canonical_job_schema(self) -> "ListingRecord":
+        def _normalize_company(value: str) -> str:
+            cleaned = re.sub(r"[^a-z0-9]+", " ", value.lower()).strip()
+            suffixes = {"inc", "llc", "ltd", "corp", "corporation", "company", "co"}
+            parts = [part for part in cleaned.split() if part not in suffixes]
+            return "-".join(parts) or "unknown-company"
+
+        def _normalize_role(value: str) -> str:
+            lowered = value.lower()
+            replacements = {
+                "sr": "senior",
+                "mgr": "manager",
+                "pm": "product manager",
+                "&": " and ",
+            }
+            for source, target in replacements.items():
+                lowered = lowered.replace(source, target)
+            cleaned = re.sub(r"[^a-z0-9]+", " ", lowered).strip()
+            stopwords = {"the", "a", "an"}
+            parts = [part for part in cleaned.split() if part not in stopwords]
+            return "-".join(parts) or "unknown-role"
+
+        def _normalize_location(value: str) -> str:
+            lowered = re.sub(r"[^a-z0-9]+", " ", value.lower()).strip()
+            if not lowered:
+                return "unspecified"
+            if "remote" in lowered:
+                return "remote"
+            replacements = {
+                "san francisco": "san-francisco",
+                "new york city": "new-york",
+                "new york": "new-york",
+                "nyc": "new-york",
+                "bay area": "bay-area",
+                "united states": "us",
+            }
+            for source, target in replacements.items():
+                lowered = lowered.replace(source, target)
+            return "-".join(lowered.split()) or "unspecified"
+
         self.company_name = str(self.company_name or "").strip() or "Unknown Company"
         self.title = str(self.title or "").strip() or "Untitled Role"
         self.url = str(self.url or "").strip()
@@ -386,12 +432,19 @@ class ListingRecord(BaseModel):
         if not self.url:
             raise ValueError("ListingRecord.url is required")
 
+        company_key = _normalize_company(self.company_name)
+        role_key = _normalize_role(self.title)
+        location_key = _normalize_location(self.location)
         self.canonical_job = CanonicalJobRecord(
             url=self.url,
             company=self.company_name,
             title=self.title,
             location=self.location,
             source_type=self.source_type,
+            identity_key=f"{company_key}::{role_key}::{location_key}",
+            company_key=company_key,
+            role_key=role_key,
+            location_key=location_key,
         )
         self.metadata_json["canonical_job"] = self.canonical_job.model_dump()
         return self
@@ -414,6 +467,7 @@ class CandidateProfilePayload(BaseModel):
     competencies_json: list[str] = Field(default_factory=list)
     explicit_preferences_json: list[str] = Field(default_factory=list)
     seniority_guess: Optional[str] = None
+    years_experience: Optional[int] = None
     stage_preferences_json: list[str] = Field(default_factory=list)
     core_titles_json: list[str] = Field(default_factory=list)
     excluded_keywords_json: list[str] = Field(default_factory=list)
@@ -446,6 +500,7 @@ class CandidateProfilePayload(BaseModel):
                     excluded_keywords=self.excluded_keywords_json,
                     seniority=ProfileSeniorityPreferences(
                         guess=self.seniority_guess,
+                        years_experience=self.years_experience,
                         minimum_band=self.min_seniority_band,
                         maximum_band=self.max_seniority_band,
                     ),
@@ -478,6 +533,7 @@ class CandidateProfilePayload(BaseModel):
             self.stretch_role_families_json = list(targeting.stretch_role_families)
             self.excluded_keywords_json = list(targeting.excluded_keywords)
             self.seniority_guess = targeting.seniority.guess
+            self.years_experience = targeting.seniority.years_experience
             self.min_seniority_band = targeting.seniority.minimum_band
             self.max_seniority_band = targeting.seniority.maximum_band
             self.minimum_fit_threshold = self.structured_profile_json.scoring.minimum_fit_threshold
@@ -486,6 +542,7 @@ class CandidateProfilePayload(BaseModel):
 
 class ProfileSeniorityPreferences(BaseModel):
     guess: Optional[str] = None
+    years_experience: Optional[int] = None
     minimum_band: str = "mid"
     maximum_band: str = "senior"
 
@@ -518,6 +575,7 @@ class SearchIntent(BaseModel):
     preferred_locations: list[str] = Field(default_factory=list)
     work_mode_preference: str = "unspecified"
     seniority_guess: Optional[str] = None
+    years_experience: Optional[int] = None
     min_seniority_band: str = "mid"
     max_seniority_band: str = "senior"
     applied_constraints: list[str] = Field(default_factory=list)
@@ -541,6 +599,7 @@ class StructuredCandidateProfile(BaseModel):
                 preferred_locations=list(self.targeting.preferred_locations),
                 work_mode_preference=self.targeting.work_mode_preference,
                 seniority_guess=self.targeting.seniority.guess,
+                years_experience=self.targeting.seniority.years_experience,
                 min_seniority_band=self.targeting.seniority.minimum_band,
                 max_seniority_band=self.targeting.seniority.maximum_band,
             )
@@ -611,6 +670,7 @@ class LeadResponse(BaseModel):
     source_lineage: Optional[str] = None
     discovery_source: Optional[str] = None
     saved: bool = False
+    seen: bool = False
     applied: bool = False
     current_status: Optional[str] = None
     status_reason_code: Optional[str] = None
@@ -646,6 +706,7 @@ class LeadResponse(BaseModel):
 
 class LeadsResponse(BaseModel):
     items: list[LeadResponse]
+    search_meta: Optional[dict[str, Any]] = None
 
 
 class SyncResult(BaseModel):

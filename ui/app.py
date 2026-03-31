@@ -6,6 +6,7 @@ import sys
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import parse_qs, urlencode, urlparse
 
 import pandas as pd
 import requests
@@ -31,7 +32,7 @@ from services.profile import attach_network_import, build_profile_data_inventory
 from services.profile_ingest import build_profile_review_rows
 from services.pipeline import ingest_user_job_link
 from ui.components.sidebar import render_operator_sidebar, render_sidebar
-from ui.screens.jobs import render_jobs_screen
+from ui.screens.jobs import build_jobs_search_loading_message, filter_restorable_dismissed_leads, render_jobs_screen
 
 
 API_BASE_URL = os.getenv("OPPORTUNITY_SCOUT_API_URL", "http://127.0.0.1:8000")
@@ -65,6 +66,8 @@ CONFIDENCE_ORDER = {"high": 0, "medium": 1, "low": 2}
 STATUS_ORDER = {status: index for index, status in enumerate(APPLICATION_STATUSES)}
 OPERATOR_CONSOLE_STATE_KEY = "show_operator_console"
 ONBOARDING_DEFERRED_STATE_KEY = "onboarding_deferred"
+API_CACHE_REVISION_STATE_KEY = "api_cache_revision"
+API_GET_CACHE_TTL_SECONDS = 15
 
 
 class TableFilters(dict):
@@ -80,16 +83,50 @@ class TableFilters(dict):
     sort_mode: str
 
 
+def _get_api_cache_revision() -> int:
+    return int(st.session_state.get(API_CACHE_REVISION_STATE_KEY, 0))
+
+
+def invalidate_api_cache() -> None:
+    st.session_state[API_CACHE_REVISION_STATE_KEY] = _get_api_cache_revision() + 1
+
+
+def _request_json(path: str, method: str = "GET", payload: Optional[dict] = None) -> Any:
+    timeout = 10 if path.startswith("/leads") else 30
+    response = requests.request(method, f"{API_BASE_URL}{path}", json=payload, timeout=timeout)
+    response.raise_for_status()
+    return response.json()
+
+
+@st.cache_data(ttl=API_GET_CACHE_TTL_SECONDS, show_spinner=False)
+def _fetch_json_cached(path: str, revision: int) -> Any:
+    del revision
+    return _request_json(path, method="GET", payload=None)
+
+
 def fetch_json(path: str, method: str = "GET", payload: Optional[dict] = None) -> Any:
     try:
-        timeout = 10 if path.startswith("/leads") else 30
-        response = requests.request(method, f"{API_BASE_URL}{path}", json=payload, timeout=timeout)
-        response.raise_for_status()
-        return response.json()
+        normalized_method = method.upper()
+        if normalized_method == "GET":
+            return _fetch_json_cached(path, _get_api_cache_revision())
+        result = _request_json(path, method=normalized_method, payload=payload)
+        invalidate_api_cache()
+        return result
     except requests.exceptions.RequestException as exc:
         if path.startswith("/leads"):
             st.error(f"Leads request failed while loading `{path}`: {exc}. The rest of the page is still available.")
-            return {"items": []}
+            query = parse_qs(urlparse(path).query).get("q", [""])[0].strip()
+            search_meta = None
+            if query:
+                search_meta = {
+                    "query": query,
+                    "status": "error",
+                    "error": str(exc),
+                    "backend_applied": False,
+                    "partial_results": False,
+                    "result_count": 0,
+                }
+            return {"items": [], "search_meta": search_meta}
         raise
 
 
@@ -197,6 +234,55 @@ def build_onboarding_state(
         "target_role_complete": target_role_complete,
         "current_step": current_step,
         "onboarding_deferred": onboarding_deferred,
+    }
+
+
+def build_resume_analysis_contract_view_model() -> dict[str, Any]:
+    return {
+        "summary": "Resume analysis extracts structured targeting fields from uploaded text so Jobs can rank roles against your profile more accurately.",
+        "does": [
+            "Extracts likely titles, domains, locations, stages, skills, competencies, and explicit work preferences from PDF, TXT, or pasted text.",
+            "Shows the extracted fields before you save them into your profile.",
+            "Uses confirmed skills and competencies in ranking when those terms appear in job titles or descriptions.",
+        ],
+        "does_not": [
+            "Does not rewrite your resume or score resume quality.",
+            "Does not infer semantic skill matches beyond the extracted terms already shown in the review step.",
+            "Does not guarantee a match boost unless the job text actually contains those skills or competencies.",
+        ],
+    }
+
+
+def build_resume_analysis_feedback(preview: dict[str, Any], response: dict[str, Any]) -> dict[str, str]:
+    warning_count = len((preview.get("warnings") or [])) + len((response.get("warnings") or []))
+    if str(preview.get("status") or "").lower() == "partial":
+        missing = ", ".join(preview.get("missing_fields") or [])
+        detail = "Resume analyzed with partial extraction. Review the highlighted fields before saving."
+        if missing:
+            detail += f" Needs review: {missing}."
+        return {"tone": "warning", "message": detail}
+    detail = "Resume analyzed and saved to your profile. Review the extracted fields below before continuing."
+    if warning_count:
+        detail += " Some extraction warnings were recorded."
+    return {"tone": "success", "message": detail}
+
+
+def build_resume_failure_feedback(error: Exception) -> dict[str, str]:
+    message = str(error).strip() or "Unknown resume parsing error."
+    lowered = message.lower()
+    if "unsupported file type" in lowered:
+        return {
+            "tone": "warning",
+            "message": "Resume analysis supports PDF, TXT, and MD files only. Upload one of those formats or paste plain text.",
+        }
+    if "empty" in lowered or "no readable text" in lowered:
+        return {
+            "tone": "warning",
+            "message": "Resume analysis could not find readable text. Try pasting plain text or uploading a simpler export.",
+        }
+    return {
+        "tone": "error",
+        "message": f"Resume analysis failed: {message}",
     }
 
 
@@ -458,20 +544,55 @@ def build_query(
     only_saved: bool = False,
     only_applied: bool = False,
     include_signal_only: bool = False,
+    q: Optional[str] = None,
 ) -> str:
-    params = [
-        f"freshness_window_days={freshness_days}",
-        f"include_hidden={'true' if include_hidden else 'false'}",
-        f"include_unqualified={'true' if include_unqualified else 'false'}",
-        f"include_signal_only={'true' if include_signal_only else 'false'}",
+    params: list[tuple[str, str]] = [
+        ("freshness_window_days", str(freshness_days)),
+        ("include_hidden", "true" if include_hidden else "false"),
+        ("include_unqualified", "true" if include_unqualified else "false"),
+        ("include_signal_only", "true" if include_signal_only else "false"),
     ]
     if lead_type != "all":
-        params.append(f"lead_type={lead_type}")
+        params.append(("lead_type", lead_type))
     if only_saved:
-        params.append("only_saved=true")
+        params.append(("only_saved", "true"))
     if only_applied:
-        params.append("only_applied=true")
-    return "/leads?" + "&".join(params)
+        params.append(("only_applied", "true"))
+    if str(q or "").strip():
+        params.append(("q", str(q).strip()))
+    return "/leads?" + urlencode(params)
+
+
+def _current_jobs_search_query(page_key: str) -> str:
+    return str(st.session_state.get(f"jobs-search-{page_key}", "")).strip()
+
+
+def fetch_leads_payload_for_view(
+    *,
+    page_key: str,
+    freshness_days: int,
+    include_hidden: bool,
+    include_unqualified: bool,
+    lead_type: str = "all",
+    only_saved: bool = False,
+    only_applied: bool = False,
+    include_signal_only: bool = False,
+) -> dict[str, Any]:
+    query = _current_jobs_search_query(page_key)
+    path = build_query(
+        freshness_days=freshness_days,
+        include_hidden=include_hidden,
+        include_unqualified=include_unqualified,
+        lead_type=lead_type,
+        only_saved=only_saved,
+        only_applied=only_applied,
+        include_signal_only=include_signal_only,
+        q=query or None,
+    )
+    if query:
+        with st.spinner(build_jobs_search_loading_message(query)):
+            return fetch_json(path)
+    return fetch_json(path)
 
 
 def get_runtime_control() -> dict[str, Any]:
@@ -1041,12 +1162,23 @@ def render_user_job_link_form() -> None:
 
 def render_profile_tab(profile: dict[str, Any], learning: dict[str, Any]) -> None:
     st.subheader("Onboarding")
-    st.caption("Optional setup for the internal validation harness: add a resume, review the profile, and pick a target role when you need it.")
+    st.caption("Upload or paste a resume, review the extracted profile fields, and pick a target role to improve matching.")
     latest_resume_ingest = st.session_state.get("latest_resume_ingest")
     draft_profile = st.session_state.get("onboarding_profile_draft")
     onboarding_deferred = bool(st.session_state.get(ONBOARDING_DEFERRED_STATE_KEY, False))
     onboarding_state = build_onboarding_state(profile, latest_resume_ingest, draft_profile, onboarding_deferred=onboarding_deferred)
     render_onboarding_progress(onboarding_state)
+    contract = build_resume_analysis_contract_view_model()
+    st.info(contract["summary"])
+    st.caption("Analyzer does: " + " | ".join(contract["does"]))
+    st.caption("Current limits: " + " | ".join(contract["does_not"]))
+
+    resume_feedback = st.session_state.get("resume-analysis-feedback")
+    if isinstance(resume_feedback, dict):
+        tone = str(resume_feedback.get("tone") or "info")
+        message = str(resume_feedback.get("message") or "").strip()
+        if message:
+            getattr(st, tone if tone in {"success", "warning", "info", "error"} else "info")(message)
 
     if onboarding_state["current_step"] == "discovery" and onboarding_state["onboarding_deferred"] and not onboarding_state["resume_complete"]:
         st.info("Setup deferred. Use Jobs, Saved, or Applied to validate the real-job path first, then return here when you want to refine the profile.")
@@ -1054,7 +1186,7 @@ def render_profile_tab(profile: dict[str, Any], learning: dict[str, Any]) -> Non
             st.session_state[ONBOARDING_DEFERRED_STATE_KEY] = False
             st.rerun()
     elif not onboarding_state["resume_complete"]:
-        st.caption("Resume upload is optional in this internal harness.")
+        st.caption("Resume upload is optional. You can browse jobs without it, but extracted profile fields usually improve match quality.")
         if st.button("Skip setup for now", use_container_width=True):
             st.session_state[ONBOARDING_DEFERRED_STATE_KEY] = True
             st.rerun()
@@ -1064,15 +1196,16 @@ def render_profile_tab(profile: dict[str, Any], learning: dict[str, Any]) -> Non
     pasted_resume = st.text_area("Paste resume text", height=120)
     if st.button("Parse resume", use_container_width=True):
         try:
-            if upload is not None:
-                preview = preview_resume_upload(upload.name, upload.getvalue())
-                response = fetch_json("/resume", method="POST", payload={"filename": upload.name, "raw_text": preview["raw_text"]})
-            elif pasted_resume.strip():
-                preview = preview_resume_text("pasted_resume.txt", pasted_resume.strip())
-                response = fetch_json("/resume", method="POST", payload={"filename": "pasted_resume.txt", "raw_text": preview["raw_text"]})
-            else:
-                st.warning("Upload a resume or paste text first.")
-                return
+            with st.spinner("Analyzing and saving resume..."):
+                if upload is not None:
+                    preview = preview_resume_upload(upload.name, upload.getvalue())
+                    response = fetch_json("/resume", method="POST", payload={"filename": upload.name, "raw_text": preview["raw_text"]})
+                elif pasted_resume.strip():
+                    preview = preview_resume_text("pasted_resume.txt", pasted_resume.strip())
+                    response = fetch_json("/resume", method="POST", payload={"filename": "pasted_resume.txt", "raw_text": preview["raw_text"]})
+                else:
+                    st.warning("Upload a resume or paste text first.")
+                    return
             st.session_state["latest_resume_ingest"] = {
                 "filename": preview["filename"],
                 "status": preview["status"],
@@ -1082,11 +1215,13 @@ def render_profile_tab(profile: dict[str, Any], learning: dict[str, Any]) -> Non
                 "text_preview": preview["text_preview"],
                 "candidate_profile": response.get("candidate_profile", preview["candidate_profile"]),
             }
+            st.session_state["resume-analysis-feedback"] = build_resume_analysis_feedback(preview, response)
             st.session_state[ONBOARDING_DEFERRED_STATE_KEY] = False
             st.session_state.pop("onboarding_profile_draft", None)
             st.rerun()
         except Exception as exc:
-            st.error(f"Resume parsing failed: {exc}")
+            st.session_state["resume-analysis-feedback"] = build_resume_failure_feedback(exc)
+            st.rerun()
 
     review_profile = draft_profile or get_profile_form_source(profile, latest_resume_ingest)
     review_rows = build_profile_review_rows(review_profile)
@@ -1094,11 +1229,16 @@ def render_profile_tab(profile: dict[str, Any], learning: dict[str, Any]) -> Non
     if latest_resume_ingest:
         st.markdown("#### Latest extraction")
         st.caption(f"Source: {latest_resume_ingest['filename']} | Status: {latest_resume_ingest['status']}")
+        matched_terms = latest_resume_ingest.get("matched_terms") or {}
+        extraction_summary = st.columns(4)
+        extraction_summary[0].metric("Titles found", len(matched_terms.get("preferred_titles") or []))
+        extraction_summary[1].metric("Domains found", len(matched_terms.get("preferred_domains") or []))
+        extraction_summary[2].metric("Skills found", len(matched_terms.get("confirmed_skills") or []))
+        extraction_summary[3].metric("Competencies found", len(matched_terms.get("competencies") or []))
         for warning in latest_resume_ingest["warnings"]:
             st.info(warning)
         if latest_resume_ingest["missing_fields"]:
             st.caption("Needs review: " + ", ".join(latest_resume_ingest["missing_fields"]))
-        matched_terms = latest_resume_ingest.get("matched_terms") or {}
         for field_name, terms in matched_terms.items():
             if terms:
                 st.caption(f"{field_name.replace('_', ' ').title()}: {', '.join(terms)}")
@@ -1123,6 +1263,7 @@ def render_profile_tab(profile: dict[str, Any], learning: dict[str, Any]) -> Non
             confirmed_skills = st.text_input("Confirmed skills", value=", ".join(review_profile.get("confirmed_skills_json", [])))
             competencies = st.text_input("Competencies", value=", ".join(review_profile.get("competencies_json", [])))
             explicit_preferences = st.text_input("Explicit preferences", value=", ".join(review_profile.get("explicit_preferences_json", [])))
+            st.caption("Confirmed skills and competencies increase match quality when they appear in job titles or descriptions.")
             stage_preferences = st.text_input("Preferred stages", value=", ".join(review_profile.get("stage_preferences_json", [])))
             stretch_role_families = st.text_input("Stretch role families", value=", ".join(review_profile.get("stretch_role_families_json", [])))
             excluded_keywords = st.text_input("Excluded keywords", value=", ".join(review_profile.get("excluded_keywords_json", [])))
@@ -1624,13 +1765,6 @@ def main() -> None:
     st.set_page_config(page_title="Opportunity Scout", layout="wide")
     st.title("Jorb")
 
-    try:
-        profile = fetch_json("/candidate-profile")
-        learning = fetch_json("/profile-learning")
-    except requests.RequestException:
-        st.error("Backend unavailable. Start FastAPI first, then refresh.")
-        st.stop()
-
     stats = fetch_optional_json("/stats")
     runtime = fetch_optional_json("/runtime-control")
     health = fetch_optional_json("/autonomy-status")
@@ -1647,12 +1781,6 @@ def main() -> None:
         if open_operator_console:
             set_operator_console(True)
             st.rerun()
-        base_query = build_query(
-            freshness_days=14,
-            include_hidden=False,
-            include_unqualified=False,
-            include_signal_only=False,
-        )
 
     if operator_console_enabled():
         if primary_page == "Discovery":
@@ -1668,15 +1796,23 @@ def main() -> None:
         return
 
     if primary_page == "Jobs":
-        leads = fetch_json(base_query)["items"]
+        jobs_payload = fetch_leads_payload_for_view(
+            page_key="jobs",
+            freshness_days=14,
+            include_hidden=False,
+            include_unqualified=False,
+            include_signal_only=False,
+        )
+        leads = jobs_payload["items"]
         latest_search_run = fetch_optional_json("/search-runs/latest")
         render_jobs_screen(
             leads=leads,
             search_run=latest_search_run,
+            search_meta=jobs_payload.get("search_meta"),
             page_key="jobs",
             title="Jobs",
             empty_message="No matching jobs found. Try adjusting filters or check back after the next refresh.",
-            last_updated=datetime.now(),
+            last_updated=st.session_state.get("jobs-last-updated-jobs"),
             run_manual_search_fn=run_manual_search,
             send_feedback_fn=send_feedback,
         )
@@ -1684,42 +1820,69 @@ def main() -> None:
         with st.expander("Add a job link", expanded=False):
             render_user_job_link_form()
     elif primary_page == "Saved":
-        saved = fetch_json(
-            build_query(
-                freshness_days=14,
-                include_hidden=False,
-                include_unqualified=False,
-                only_saved=True,
-                include_signal_only=False,
-            )
-        )["items"]
+        saved_payload = fetch_leads_payload_for_view(
+            page_key="saved",
+            freshness_days=14,
+            include_hidden=False,
+            include_unqualified=False,
+            only_saved=True,
+            include_signal_only=False,
+        )
         render_jobs_screen(
-            leads=saved,
+            leads=saved_payload["items"],
+            search_meta=saved_payload.get("search_meta"),
             page_key="saved",
             title="Saved",
             empty_message="No saved jobs yet.",
-            last_updated=datetime.now(),
+            last_updated=st.session_state.get("jobs-last-updated-saved"),
             send_feedback_fn=send_feedback,
         )
     elif primary_page == "Applied":
-        applied = fetch_json(
-            build_query(
-                freshness_days=14,
-                include_hidden=False,
-                include_unqualified=False,
-                only_applied=True,
-                include_signal_only=False,
-            )
-        )["items"]
+        applied_payload = fetch_leads_payload_for_view(
+            page_key="applied",
+            freshness_days=14,
+            include_hidden=False,
+            include_unqualified=False,
+            only_applied=True,
+            include_signal_only=False,
+        )
         render_jobs_screen(
-            leads=applied,
+            leads=applied_payload["items"],
+            search_meta=applied_payload.get("search_meta"),
             page_key="applied",
             title="Applied",
             empty_message="No applied jobs yet.",
-            last_updated=datetime.now(),
+            last_updated=st.session_state.get("jobs-last-updated-applied"),
             send_feedback_fn=send_feedback,
         )
+    elif primary_page == "Dismissed":
+        dismissed_payload = fetch_leads_payload_for_view(
+            page_key="dismissed",
+            freshness_days=14,
+            include_hidden=True,
+            include_unqualified=False,
+            include_signal_only=False,
+        )
+        dismissed = filter_restorable_dismissed_leads(dismissed_payload["items"])
+        render_jobs_screen(
+            leads=dismissed,
+            search_meta=dismissed_payload.get("search_meta"),
+            page_key="dismissed",
+            title="Dismissed",
+            empty_message="No dismissed jobs to restore.",
+            last_updated=st.session_state.get("jobs-last-updated-dismissed"),
+            send_feedback_fn=send_feedback,
+            dismiss_action="restore",
+            dismiss_label="Restore",
+            intro_message="Dismissed jobs stay hidden from Jobs, Saved, and Applied until you restore them here.",
+        )
     elif primary_page == "Profile":
+        try:
+            profile = fetch_json("/candidate-profile")
+            learning = fetch_json("/profile-learning")
+        except requests.RequestException:
+            st.error("Backend unavailable. Start FastAPI first, then refresh.")
+            st.stop()
         render_profile_tab(profile, learning)
 
 

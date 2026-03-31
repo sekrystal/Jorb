@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Optional
+import re
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from core.schemas import ListingRecord
@@ -83,15 +84,69 @@ def resolve_canonical_listing_url(url: str, source_type: str | None = None) -> s
     return urlunsplit(("https", host, path, query, ""))
 
 
+def normalize_company_identity(value: str | None) -> str:
+    cleaned = re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).strip()
+    suffixes = {"inc", "llc", "ltd", "corp", "corporation", "company", "co"}
+    parts = [part for part in cleaned.split() if part not in suffixes]
+    return "-".join(parts) or "unknown-company"
+
+
+def normalize_role_identity(value: str | None) -> str:
+    lowered = str(value or "").lower()
+    replacements = {
+        "&": " and ",
+        "sr.": "senior",
+        "sr ": "senior ",
+        "mgr": "manager",
+        "pm": "product manager",
+    }
+    for source, target in replacements.items():
+        lowered = lowered.replace(source, target)
+    cleaned = re.sub(r"[^a-z0-9]+", " ", lowered).strip()
+    return "-".join(cleaned.split()) or "unknown-role"
+
+
+def normalize_location_identity(value: str | None) -> str:
+    lowered = re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).strip()
+    if not lowered:
+        return "unspecified"
+    if "remote" in lowered:
+        return "remote"
+    replacements = {
+        "san francisco": "san-francisco",
+        "new york city": "new-york",
+        "new york": "new-york",
+        "nyc": "new-york",
+        "bay area": "bay-area",
+        "united states": "us",
+    }
+    for source, target in replacements.items():
+        lowered = lowered.replace(source, target)
+    return "-".join(lowered.split()) or "unspecified"
+
+
+def canonical_job_identity(company_name: str | None, title: str | None, location: str | None) -> str:
+    return (
+        f"{normalize_company_identity(company_name)}::"
+        f"{normalize_role_identity(title)}::"
+        f"{normalize_location_identity(location)}"
+    )
+
+
 def listing_dedupe_key(record: ListingRecord) -> tuple[str, str, str, str]:
     metadata = dict(record.metadata_json or {})
     canonical_url = metadata.get("canonical_url") or record.url
     internal_job_id = str(metadata.get("internal_job_id") or "").strip().lower()
+    canonical_job = dict(metadata.get("canonical_job") or {})
+    identity_key = (
+        canonical_job.get("identity_key")
+        or canonical_job_identity(record.company_name, record.title, record.location)
+    )
     return (
-        str(record.source_type or "").strip().lower(),
+        identity_key,
         internal_job_id,
         str(canonical_url or "").strip().lower(),
-        f"{str(record.company_name or '').strip().lower()}::{str(record.title or '').strip().lower()}",
+        str(record.source_type or "").strip().lower(),
     )
 
 

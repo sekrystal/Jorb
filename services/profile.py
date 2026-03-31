@@ -27,6 +27,30 @@ KNOWN_TITLES = [
 KNOWN_LOCATIONS = ["san francisco", "new york", "remote", "bay area", "nyc"]
 KNOWN_DOMAINS = ["ai", "developer tools", "infra", "saas", "fintech", "b2b", "healthtech"]
 KNOWN_STAGES = ["seed", "series a", "series b", "early-stage", "startup", "growth"]
+KNOWN_SKILLS = [
+    "sql",
+    "analytics",
+    "stakeholder management",
+    "cross-functional leadership",
+    "customer discovery",
+    "recruiting",
+    "program management",
+    "implementation",
+]
+KNOWN_COMPETENCIES = [
+    "process design",
+    "systems thinking",
+    "operator judgment",
+    "zero-to-one execution",
+    "execution",
+]
+KNOWN_EXPLICIT_PREFERENCES = [
+    "hands-on teams",
+    "customer-facing work",
+    "small teams",
+    "remote-friendly",
+    "clear scope",
+]
 KNOWN_WORK_MODES = ("remote", "hybrid", "onsite")
 DEFAULT_TARGET_ROLES = ["chief of staff", "founding operations lead"]
 SENIORITY_KEYWORDS = {
@@ -137,6 +161,14 @@ def _guess_seniority(text: str) -> str:
     return "senior"
 
 
+def _extract_years_experience(text: str) -> int | None:
+    lowered = text.lower()
+    years = [int(item) for item in re.findall(r"(\d+)\+?\s+years", lowered)]
+    if years:
+        return max(years)
+    return None
+
+
 def _dedupe_preserving_order(values: list[str]) -> list[str]:
     ordered: list[str] = []
     seen: set[str] = set()
@@ -222,6 +254,11 @@ def build_search_intent(profile: CandidateProfile | dict[str, Any]) -> SearchInt
         preferred_locations=preferred_locations,
         work_mode_preference=work_mode_preference,
         seniority_guess=profile_data.get("seniority_guess") or persisted_intent.get("seniority_guess"),
+        years_experience=(
+            profile_data.get("years_experience")
+            or targeting.get("seniority", {}).get("years_experience")
+            or persisted_intent.get("years_experience")
+        ),
         min_seniority_band=str(profile_data.get("min_seniority_band") or persisted_intent.get("min_seniority_band") or "mid"),
         max_seniority_band=str(profile_data.get("max_seniority_band") or persisted_intent.get("max_seniority_band") or "senior"),
         applied_constraints=applied_constraints,
@@ -241,7 +278,11 @@ def _extract_summary(raw_text: str) -> dict:
     locations = _match_known_terms(raw_text, KNOWN_LOCATIONS)
     domains = _match_known_terms(raw_text, KNOWN_DOMAINS)
     stages = _match_known_terms(raw_text, KNOWN_STAGES)
+    confirmed_skills = _match_known_terms(raw_text, KNOWN_SKILLS)
+    competencies = _match_known_terms(raw_text, KNOWN_COMPETENCIES)
+    explicit_preferences = _match_known_terms(raw_text, KNOWN_EXPLICIT_PREFERENCES)
     seniority = _guess_seniority(raw_text)
+    years_experience = _extract_years_experience(raw_text)
 
     adjacent_titles = [title for title in ["business operations", "implementation lead", "program manager"] if title not in titles]
     preferred_titles = titles[:4] or ["chief of staff", "founding operations lead"]
@@ -258,9 +299,13 @@ def _extract_summary(raw_text: str) -> dict:
         "preferred_locations_json": locations or ["san francisco", "new york", "remote"],
         "target_roles_json": target_roles,
         "work_mode_preference": work_mode,
+        "confirmed_skills_json": confirmed_skills,
+        "competencies_json": competencies,
+        "explicit_preferences_json": explicit_preferences,
         "preferred_domains_json": domains or ["ai", "developer tools", "infra"],
         "stage_preferences_json": stages or ["early-stage", "series a"],
         "seniority_guess": seniority,
+        "years_experience": years_experience,
         "min_seniority_band": "mid" if seniority in {"senior", "staff", "executive"} else "junior",
         "max_seniority_band": "staff" if seniority in {"staff", "executive"} else seniority,
         "stretch_role_families_json": stretch_families,
@@ -304,6 +349,7 @@ def get_candidate_profile(session: Session) -> CandidateProfile:
         competencies_json=["operator judgment", "process design", "zero-to-one execution"],
         explicit_preferences_json=["hands-on teams", "customer-facing work", "clear scope"],
         seniority_guess="senior",
+        years_experience=7,
         stage_preferences_json=["early-stage", "series a"],
         core_titles_json=["chief of staff", "founding operations lead"],
         excluded_keywords_json=["rocket propulsion", "phd required", "principal scientist"],
@@ -338,7 +384,11 @@ def profile_to_payload(profile: CandidateProfile) -> CandidateProfilePayload:
         preferred_locations_json=profile.preferred_locations_json or [],
         target_roles_json=search_intent.target_roles,
         work_mode_preference=search_intent.work_mode_preference,
+        confirmed_skills_json=(structured_profile or {}).get("targeting", {}).get("confirmed_skills", []),
+        competencies_json=(structured_profile or {}).get("targeting", {}).get("competencies", []),
+        explicit_preferences_json=(structured_profile or {}).get("targeting", {}).get("explicit_preferences", []),
         seniority_guess=profile.seniority_guess,
+        years_experience=(structured_profile.get("targeting", {}).get("seniority", {}) or {}).get("years_experience"),
         stage_preferences_json=profile.stage_preferences_json or [],
         core_titles_json=profile.core_titles_json or [],
         excluded_keywords_json=profile.excluded_keywords_json or [],
@@ -365,28 +415,30 @@ def ingest_resume(session: Session, filename: str, raw_text: str) -> ResumeUploa
     parsed = _extract_summary(raw_text)
     resume = ResumeDocument(filename=filename, raw_text=raw_text, parsed_json=parsed)
     session.add(resume)
-    profile = get_candidate_profile(session)
-
-    profile.raw_resume_text = raw_text
-    profile.name = profile.name or filename.rsplit(".", 1)[0]
-    profile.extracted_summary_json = {"summary": parsed["summary"], "resume_filename": filename}
-    profile.preferred_titles_json = parsed["preferred_titles_json"]
-    profile.adjacent_titles_json = parsed["adjacent_titles_json"]
-    profile.excluded_titles_json = parsed["excluded_titles_json"]
-    profile.preferred_domains_json = parsed["preferred_domains_json"]
-    profile.preferred_locations_json = parsed["preferred_locations_json"]
-    profile.seniority_guess = parsed["seniority_guess"]
-    profile.stage_preferences_json = parsed["stage_preferences_json"]
-    profile.core_titles_json = parsed["core_titles_json"]
-    profile.excluded_keywords_json = parsed["excluded_keywords_json"]
-    profile.min_seniority_band = parsed["min_seniority_band"]
-    profile.max_seniority_band = parsed["max_seniority_band"]
-    profile.stretch_role_families_json = parsed["stretch_role_families_json"]
-    payload = _with_structured_profile(profile_to_payload(profile))
-    profile.extracted_summary_json = _merge_structured_profile(
-        {"summary": parsed["summary"], "resume_filename": filename},
-        payload,
+    payload = CandidateProfilePayload(
+        name=filename.rsplit(".", 1)[0] or "Candidate",
+        raw_resume_text=raw_text,
+        extracted_summary_json={"summary": parsed["summary"], "resume_filename": filename},
+        preferred_titles_json=parsed["preferred_titles_json"],
+        adjacent_titles_json=parsed["adjacent_titles_json"],
+        excluded_titles_json=parsed["excluded_titles_json"],
+        preferred_domains_json=parsed["preferred_domains_json"],
+        preferred_locations_json=parsed["preferred_locations_json"],
+        target_roles_json=parsed["target_roles_json"],
+        work_mode_preference=parsed["work_mode_preference"],
+        confirmed_skills_json=parsed["confirmed_skills_json"],
+        competencies_json=parsed["competencies_json"],
+        explicit_preferences_json=parsed["explicit_preferences_json"],
+        seniority_guess=parsed["seniority_guess"],
+        years_experience=parsed["years_experience"],
+        stage_preferences_json=parsed["stage_preferences_json"],
+        core_titles_json=parsed["core_titles_json"],
+        excluded_keywords_json=parsed["excluded_keywords_json"],
+        min_seniority_band=parsed["min_seniority_band"],
+        max_seniority_band=parsed["max_seniority_band"],
+        stretch_role_families_json=parsed["stretch_role_families_json"],
     )
+    profile = update_candidate_profile(session, payload)
 
     session.flush()
     return ResumeUploadResponse(

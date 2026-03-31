@@ -9,17 +9,29 @@ import requests
 from services.profile_ingest import build_profile_review_rows
 from ui import app as ui_app
 from ui.components import sidebar as sidebar_component
-from ui.components.topbar import build_jobs_filters_panel_copy, count_active_job_filters
+from ui.components.topbar import build_jobs_filters_panel_copy, build_jobs_page_header_copy, count_active_job_filters
 from ui.app import filter_and_sort_table
 from ui.components.job_card import build_job_card_markup
 from ui.screens.jobs import (
+    build_jobs_action_feedback,
+    build_job_detail_panel_markup,
+    build_jobs_detail_empty_state_markup,
+    build_jobs_empty_state_markup,
+    build_jobs_intro_state_markup,
+    build_jobs_search_loading_message,
     build_job_view_model,
     build_jobs_empty_state_view_model,
     build_manual_search_feedback,
     build_search_state_view_model,
+    filter_restorable_dismissed_leads,
     jobs_backend_gap_frame,
+    normalize_job_search_query,
     render_search_status_region,
+    _filter_jobs,
 )
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_filter_and_sort_table_filters_by_search_and_status() -> None:
@@ -228,6 +240,67 @@ def test_build_jobs_filters_panel_copy_reports_active_filter_count() -> None:
     }
     assert active_copy["eyebrow"] == "Filters"
     assert active_copy["count_label"] == "2 active filters"
+
+
+def test_build_jobs_page_header_copy_describes_workspace_views() -> None:
+    jobs_copy = build_jobs_page_header_copy(title="Jobs")
+    dismissed_copy = build_jobs_page_header_copy(title="Dismissed")
+
+    assert jobs_copy["eyebrow"] == "Workspace"
+    assert "ranked opportunities" in jobs_copy["description"]
+    assert dismissed_copy["title"] == "Dismissed"
+    assert "restore" in dismissed_copy["description"].lower()
+
+
+def test_build_query_includes_backend_search_param_when_query_present() -> None:
+    query = ui_app.build_query(
+        freshness_days=14,
+        include_hidden=False,
+        include_unqualified=False,
+        include_signal_only=False,
+        q="chief of staff",
+    )
+
+    assert query.startswith("/leads?")
+    assert "q=chief+of+staff" in query
+
+
+def test_fetch_json_returns_search_meta_for_failed_backend_search(monkeypatch) -> None:
+    captured: dict[str, str] = {}
+
+    class FakeStreamlit:
+        session_state: dict[str, object] = {}
+
+        def error(self, value: str) -> None:
+            captured["error"] = value
+
+    def fail(_path: str, _revision: int) -> object:
+        raise requests.exceptions.RequestException("backend timeout")
+
+    monkeypatch.setattr(ui_app, "st", FakeStreamlit())
+    monkeypatch.setattr(ui_app, "_fetch_json_cached", fail)
+
+    payload = ui_app.fetch_json("/leads?freshness_window_days=14&q=chief+of+staff")
+
+    assert "backend timeout" in captured["error"]
+    assert payload["items"] == []
+    assert payload["search_meta"]["query"] == "chief of staff"
+    assert payload["search_meta"]["status"] == "error"
+
+
+def test_build_profile_review_rows_include_skills_competencies_and_preferences() -> None:
+    rows = build_profile_review_rows(
+        {
+            "confirmed_skills_json": ["sql", "stakeholder management"],
+            "competencies_json": ["process design"],
+            "explicit_preferences_json": ["hands-on teams"],
+        }
+    )
+
+    fields = {row["field"]: row["value"] for row in rows}
+    assert fields["Confirmed skills"] == "sql, stakeholder management"
+    assert fields["Competencies"] == "process design"
+    assert fields["Explicit preferences"] == "hands-on teams"
 
 
 def test_recent_search_runs_frame_exposes_query_and_failure_observability() -> None:
@@ -516,9 +589,9 @@ def test_streamlit_primary_navigation_keeps_product_pages_separate_from_operator
 
 
 def test_streamlit_jobs_shell_demotes_job_link_and_moves_operator_access_out_of_primary_nav() -> None:
-    app_source = Path("ui/app.py").read_text()
-    sidebar_source = Path("ui/components/sidebar.py").read_text()
-    jobs_source = Path("ui/screens/jobs.py").read_text()
+    app_source = (REPO_ROOT / "ui/app.py").read_text()
+    sidebar_source = (REPO_ROOT / "ui/components/sidebar.py").read_text()
+    jobs_source = (REPO_ROOT / "ui/screens/jobs.py").read_text()
 
     assert 'with st.expander("Add a job link", expanded=False):' in app_source
     assert app_source.index('render_jobs_screen(') < app_source.index('with st.expander("Add a job link", expanded=False):')
@@ -535,8 +608,8 @@ def test_streamlit_jobs_shell_demotes_job_link_and_moves_operator_access_out_of_
 
 
 def test_streamlit_primary_shell_copy_avoids_internal_system_language() -> None:
-    app_source = Path("ui/app.py").read_text()
-    sidebar_source = Path("ui/components/sidebar.py").read_text()
+    app_source = (REPO_ROOT / "ui/app.py").read_text()
+    sidebar_source = (REPO_ROOT / "ui/components/sidebar.py").read_text()
 
     assert 'Save profile and view jobs' in app_source
     assert '#### Step 4: View jobs' in app_source
@@ -580,9 +653,32 @@ def test_fetch_json_returns_empty_leads_payload_on_request_failure(monkeypatch) 
 
     payload = ui_app.fetch_json("/leads?freshness_window_days=14")
 
-    assert payload == {"items": []}
+    assert payload == {"items": [], "search_meta": None}
     assert captured
     assert captured_timeout == [10]
+
+
+def test_cached_get_fetch_reuses_response_until_revision_changes(monkeypatch) -> None:
+    calls: list[tuple[str, str]] = []
+
+    def fake_request_json(path: str, method: str = "GET", payload: dict | None = None):
+        calls.append((path, method))
+        return {"path": path, "call_count": len(calls)}
+
+    ui_app._fetch_json_cached.clear()
+    monkeypatch.setattr(ui_app, "_request_json", fake_request_json)
+
+    first = ui_app._fetch_json_cached("/candidate-profile", 0)
+    second = ui_app._fetch_json_cached("/candidate-profile", 0)
+    third = ui_app._fetch_json_cached("/candidate-profile", 1)
+
+    assert first == {"path": "/candidate-profile", "call_count": 1}
+    assert second == first
+    assert third == {"path": "/candidate-profile", "call_count": 2}
+    assert calls == [
+        ("/candidate-profile", "GET"),
+        ("/candidate-profile", "GET"),
+    ]
 
 
 def test_profile_inventory_frame_labels_local_and_cloud_assisted_categories() -> None:
@@ -746,6 +842,104 @@ def test_build_job_view_model_exposes_explicit_source_and_provenance_fields() ->
     assert job["tags"] == ["fresh", "strong fit", "high", "onsite"]
 
 
+def test_build_job_view_model_precomputes_search_and_sort_fields() -> None:
+    job = build_job_view_model(
+        {
+            "id": 21,
+            "company_name": "Acme",
+            "primary_title": "Founding Operations Lead",
+            "saved": False,
+            "applied": False,
+            "freshness_label": "fresh",
+            "qualification_fit_label": "strong fit",
+            "confidence_label": "high",
+            "score_breakdown_json": {"final_score": 8.9, "recommendation_band": "strong", "explanation": {"headline": "Strong recommendation"}},
+            "evidence_json": {
+                "location": "Remote - US",
+                "location_scope": "remote_us",
+                "description_text": "Build recruiting systems and run operating cadence.",
+            },
+            "posted_at": "2026-03-24T10:00:00Z",
+        }
+    )
+
+    assert "founding operations lead" in job["_search_haystack"]
+    assert job["_search_fields"]["location"] == "remote - us"
+    assert job["_recommendation_sort"] == 8.9
+    assert isinstance(job["_posted_at_sort"], datetime)
+
+
+def test_build_job_view_model_keeps_canonical_multiline_description_readable() -> None:
+    job = build_job_view_model(
+        {
+            "id": 22,
+            "company_name": "Acme",
+            "primary_title": "Founding Operations Lead",
+            "saved": False,
+            "applied": False,
+            "freshness_label": "fresh",
+            "qualification_fit_label": "strong fit",
+            "confidence_label": "high",
+            "score_breakdown_json": {"final_score": 8.9, "recommendation_band": "strong", "explanation": {"headline": "Strong recommendation"}},
+            "evidence_json": {
+                "location": "Remote - US",
+                "location_scope": "remote_us",
+                "description_text": "Overview\nLead operating cadence.\n\nResponsibilities\n- Build recruiting systems",
+            },
+            "posted_at": "2026-03-24T10:00:00Z",
+        }
+    )
+
+    assert "Overview\nLead operating cadence." in job["full_description"]
+    assert "<p>" not in job["full_description"]
+
+
+def test_filter_jobs_uses_precomputed_search_fields_from_view_models(monkeypatch) -> None:
+    jobs = [
+        {
+            "id": "1",
+            "title": "Chief of Staff",
+            "company": "Acme",
+            "location": "Remote",
+            "source": "greenhouse",
+            "description": "Run leadership operations",
+            "explanation": "Great fit",
+            "tags": ["fresh"],
+            "work_mode": "remote",
+            "_search_fields": {
+                "title": "chief of staff",
+                "company": "acme",
+                "location": "remote",
+                "source": "greenhouse",
+                "description": "run leadership operations",
+                "explanation": "great fit",
+                "tags": "fresh",
+            },
+            "_search_haystack": "chief of staff acme remote greenhouse run leadership operations great fit fresh",
+            "_posted_at_sort": datetime(2026, 3, 24, tzinfo=timezone.utc),
+            "_recommendation_sort": 8.4,
+            "raw_lead": {"posted_at": "2026-03-24T00:00:00Z", "score_breakdown_json": {"final_score": 8.4}},
+        }
+    ]
+
+    def fail_if_called(value):
+        raise AssertionError(f"_searchable_text should not run for precomputed jobs: {value}")
+
+    monkeypatch.setattr("ui.screens.jobs._searchable_text", fail_if_called)
+
+    filtered = _filter_jobs(
+        jobs,
+        {
+            "search": "chief remote",
+            "location": "",
+            "remote_only": False,
+            "sort_by": "Best match",
+        },
+    )
+
+    assert [job["id"] for job in filtered] == ["1"]
+
+
 def test_build_job_card_markup_matches_figma_hierarchy_without_diagnostics() -> None:
     markup = build_job_card_markup(
         {
@@ -756,7 +950,7 @@ def test_build_job_card_markup_matches_figma_hierarchy_without_diagnostics() -> 
             "work_mode": "onsite",
             "description": "Lead founder operations and recruiting systems across the business.",
             "match_score_display": "8.1",
-            "match_label": "Strong Match",
+            "match_label": "High fit",
             "explanation": "Strong overlap with operating cadence and systems ownership.",
             "tags": ["fresh", "strong fit", "high", "onsite"],
             "posted_date": "2026-03-24T12:00:00Z",
@@ -772,6 +966,9 @@ def test_build_job_card_markup_matches_figma_hierarchy_without_diagnostics() -> 
     assert "Founding Operations Lead" in markup
     assert "Acme" in markup
     assert "San Francisco, CA" in markup
+    assert "Opportunity" in markup
+    assert "Summary" in markup
+    assert "yc_jobs" in markup
     assert "Why this matches" in markup
     assert "Strong overlap with operating cadence and systems ownership." in markup
     assert "Saved" in markup
@@ -790,7 +987,7 @@ def test_build_job_card_markup_hides_new_state_badge_and_escapes_content() -> No
             "work_mode": "remote",
             "description": "Own <systems> and planning.",
             "match_score_display": "7.4",
-            "match_label": "Medium Match",
+            "match_label": "Medium fit",
             "explanation": "Fits & scales quickly.",
             "tags": ["fresh"],
             "posted_date": "2026-03-24T12:00:00Z",
@@ -804,7 +1001,69 @@ def test_build_job_card_markup_hides_new_state_badge_and_escapes_content() -> No
     assert "North &amp; South" in markup
     assert "Own &lt;systems&gt; and planning." in markup
     assert "Fits &amp; scales quickly." in markup
-    assert 'class="jorb-job-state' not in markup
+    assert "New" in markup
+
+
+def test_build_job_detail_panel_markup_preserves_hierarchy_and_multiline_copy() -> None:
+    markup = build_job_detail_panel_markup(
+        {
+            "id": "19",
+            "title": "Founding Operations Lead",
+            "company": "Acme",
+            "location": "San Francisco, CA",
+            "work_mode": "onsite",
+            "source": "greenhouse",
+            "state": "saved",
+            "tags": ["fresh", "strong fit"],
+            "match_score_display": "8.1",
+            "match_label": "High fit",
+            "explanation": "Strong overlap with operating cadence.",
+            "why_this_job": "You have led recruiting systems.",
+            "what_you_are_missing": "No major gaps recorded.",
+            "suggested_next_steps": "Reach out to the hiring manager.",
+            "full_description": "Responsibilities\n- Build systems\n\nRequirements\n- 5+ years",
+            "backend_gaps": ["salary"],
+        }
+    )
+
+    assert "Selected job" in markup
+    assert "Recommendation summary" in markup
+    assert "Full description" in markup
+    assert "jorb-job-detail-section-copy" in markup
+    assert "Source gaps" in markup
+    assert "salary" in markup
+
+
+def test_build_job_view_model_surfaces_seen_state_and_decision_signals() -> None:
+    job = build_job_view_model(
+        {
+            "id": 42,
+            "primary_title": "Chief of Staff",
+            "company_name": "Acme",
+            "posted_at": "2026-03-24T12:00:00Z",
+            "rank_label": "medium",
+            "seen": True,
+            "saved": False,
+            "applied": False,
+            "score_breakdown_json": {
+                "final_score": 6.8,
+                "match_tier": "medium",
+                "top_matching_signals": ["required skill: sql", "domain: ai"],
+                "missing_signals": ["missing required skill: recruiting"],
+                "action_explanation": "Review before applying.",
+            },
+            "evidence_json": {
+                "location": "Remote - US",
+                "source_type": "greenhouse",
+                "description_text": "Lead executive operations.",
+            },
+        }
+    )
+
+    assert job["state"] == "seen"
+    assert job["match_label"] == "Medium fit"
+    assert "Top signals: required skill: sql, domain: ai." in job["explanation"]
+    assert "Missing: missing required skill: recruiting." in job["explanation"]
 
 
 def test_jobs_backend_gap_frame_flattens_missing_fields() -> None:
@@ -828,8 +1087,20 @@ def test_build_search_state_view_model_reports_running_state() -> None:
     )
 
     assert view_model["tone"] == "info"
+    assert view_model["badge"] == "Loading"
     assert view_model["title"] == "Search is running."
     assert "current run finishes" in view_model["detail"]
+
+
+def test_normalize_job_search_query_collapses_case_spacing_and_punctuation() -> None:
+    normalized = normalize_job_search_query("  Chief-of   Staff, AI  ")
+
+    assert normalized["text"] == "chief-of staff, ai"
+    assert normalized["tokens"] == ["chief", "of", "staff", "ai"]
+
+
+def test_build_jobs_search_loading_message_mentions_query() -> None:
+    assert build_jobs_search_loading_message("chief of staff") == "Searching jobs for 'chief of staff'..."
 
 
 def test_build_search_state_view_model_reports_manual_trigger_when_no_run_exists() -> None:
@@ -854,6 +1125,23 @@ def test_build_search_state_view_model_reports_failure_state() -> None:
     assert "timeout" in view_model["detail"]
 
 
+def test_build_search_state_view_model_reports_backend_search_error_state() -> None:
+    view_model = build_search_state_view_model(
+        None,
+        search_meta={
+            "query": "chief of staff",
+            "status": "error",
+            "error": "timeout",
+            "backend_applied": False,
+        },
+    )
+
+    assert view_model["tone"] == "error"
+    assert view_model["badge"] == "Error"
+    assert view_model["title"] == "Search failed."
+    assert "chief of staff" in view_model["detail"]
+
+
 def test_build_search_state_view_model_reports_zero_results_state() -> None:
     view_model = build_search_state_view_model(
         {
@@ -865,6 +1153,7 @@ def test_build_search_state_view_model_reports_zero_results_state() -> None:
     )
 
     assert view_model["tone"] == "warning"
+    assert view_model["badge"] == "Zero results"
     assert view_model["title"] == "Search finished with no matching jobs."
     assert "checked 1 query" in view_model["detail"]
 
@@ -880,6 +1169,7 @@ def test_build_search_state_view_model_reports_success_state() -> None:
     )
 
     assert view_model["tone"] == "success"
+    assert view_model["badge"] == "Loaded"
     assert view_model["title"] == "Search finished successfully."
     assert "found 5 jobs across 2 queries" in view_model["detail"]
 
@@ -926,8 +1216,45 @@ def test_render_search_status_region_renders_inline_jobs_status(monkeypatch) -> 
     assert captured["caption"] == "Search status"
     assert captured["unsafe_allow_html"] is True
     assert "Search finished successfully." in str(captured["markdown"])
+    assert "Loaded" in str(captured["markdown"])
     assert "The latest run found 5 jobs across 2 queries" in str(captured["markdown"])
     assert "3 jobs in view" in str(captured["markdown"])
+
+
+def test_render_search_status_region_prefers_backend_search_meta_over_latest_search_run(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeStreamlit:
+        def caption(self, value: str) -> None:
+            captured["caption"] = value
+
+        def markdown(self, value: str, unsafe_allow_html: bool = False) -> None:
+            captured["markdown"] = value
+            captured["unsafe_allow_html"] = unsafe_allow_html
+
+    monkeypatch.setattr("ui.screens.jobs.st", FakeStreamlit())
+
+    render_search_status_region(
+        {
+            "status": "results",
+            "query_count": 5,
+            "result_count": 99,
+            "created_at": "2026-03-29T12:30:00Z",
+        },
+        visible_job_count=2,
+        search_meta={
+            "query": "chief of staff",
+            "status": "results",
+            "result_count": 2,
+            "searched_fields": ["title", "company", "location", "description", "tags", "explanation", "source"],
+            "backend_applied": True,
+        },
+    )
+
+    assert captured["caption"] == "Search status"
+    assert "Search results loaded." in str(captured["markdown"])
+    assert "Found 2 jobs for &#x27;chief of staff&#x27;" in str(captured["markdown"])
+    assert "99 jobs" not in str(captured["markdown"])
 
 
 def test_build_manual_search_feedback_reports_surfaced_jobs() -> None:
@@ -972,6 +1299,245 @@ def test_build_jobs_empty_state_view_model_reports_filter_hidden_results() -> No
 
     assert view_model["title"] == "No jobs match the current filters."
     assert view_model["show_clear_filters"] is True
+    assert view_model["tone"] == "info"
+
+
+def test_build_jobs_empty_state_view_model_uses_backend_search_meta_for_zero_results() -> None:
+    view_model = build_jobs_empty_state_view_model(
+        None,
+        total_job_count=0,
+        filters={"search": "chief of staff", "location": "", "remote_only": False},
+        search_meta={
+            "query": "chief of staff",
+            "status": "empty",
+            "result_count": 0,
+            "searched_fields": ["title", "company", "location", "description", "tags", "explanation", "source"],
+            "backend_applied": True,
+        },
+    )
+
+    assert view_model["tone"] == "warning"
+    assert view_model["title"] == "No jobs matched this search."
+    assert "chief of staff" in view_model["detail"]
+
+
+def test_build_jobs_empty_state_markup_renders_structured_card_copy() -> None:
+    markup = build_jobs_empty_state_markup(
+        {
+            "tone": "warning",
+            "eyebrow": "Search",
+            "badge": "Zero results",
+            "title": "Search finished with no matching jobs.",
+            "detail": "The latest run checked 2 queries.",
+        }
+    )
+
+    assert "Search finished with no matching jobs." in markup
+    assert "The latest run checked 2 queries." in markup
+    assert "Zero results" in markup
+    assert "text-transform:uppercase" in markup
+
+
+def test_build_jobs_detail_empty_state_markup_guides_selection() -> None:
+    markup = build_jobs_detail_empty_state_markup()
+
+    assert "Select a job to inspect its full rationale." in markup
+    assert "Use the list on the left" in markup
+    assert "Nothing selected" in markup
+
+
+def test_build_jobs_intro_state_markup_keeps_non_jobs_views_structured() -> None:
+    markup = build_jobs_intro_state_markup(
+        title="Dismissed",
+        intro_message="Dismissed jobs stay hidden from active views until you restore them here.",
+    )
+
+    assert "Dismissed view" in markup
+    assert "Dismissed jobs stay hidden from active views" in markup
+    assert "Workspace" in markup
+
+
+def test_filter_restorable_dismissed_leads_only_keeps_user_dismissed_rows() -> None:
+    leads = [
+        {
+            "id": 1,
+            "hidden": True,
+            "evidence_json": {"user_dismissed_at": "2026-03-31T12:00:00Z", "suppression_category": "user_dismissed"},
+        },
+        {
+            "id": 2,
+            "hidden": True,
+            "evidence_json": {"suppression_category": "stale"},
+        },
+        {
+            "id": 3,
+            "hidden": False,
+            "evidence_json": {},
+        },
+    ]
+
+    filtered = filter_restorable_dismissed_leads(leads)
+
+    assert [lead["id"] for lead in filtered] == [1]
+
+
+def test_build_jobs_action_feedback_makes_dismiss_and_restore_clear() -> None:
+    dismiss_feedback = build_jobs_action_feedback("dislike")
+    restore_feedback = build_jobs_action_feedback("restore")
+
+    assert dismiss_feedback["tone"] == "success"
+    assert "hidden from Jobs, Saved, and Applied" in dismiss_feedback["message"]
+    assert restore_feedback == {
+        "tone": "success",
+        "message": "Job restored. It is visible in active job views again.",
+    }
+
+
+def test_filter_jobs_matches_description_tags_and_source_not_just_title_company() -> None:
+    jobs = [
+        {
+            "id": "1",
+            "title": "Operations Lead",
+            "company": "Acme",
+            "location": "Remote",
+            "work_mode": "remote",
+            "description": "Own recruiting systems and hiring operations for an agentic tooling team.",
+            "explanation": "Agent systems fit.",
+            "source": "search_web",
+            "tags": ["fresh", "agentic"],
+            "raw_lead": {"score_breakdown_json": {"final_score": 7.2}, "posted_at": "2026-03-29T10:00:00Z", "surfaced_at": "2026-03-29T11:00:00Z"},
+        },
+        {
+            "id": "2",
+            "title": "Founding Recruiter",
+            "company": "Beta",
+            "location": "New York",
+            "work_mode": "onsite",
+            "description": "General recruiting work.",
+            "explanation": "General fit.",
+            "source": "greenhouse",
+            "tags": ["fresh"],
+            "raw_lead": {"score_breakdown_json": {"final_score": 8.1}, "posted_at": "2026-03-30T10:00:00Z", "surfaced_at": "2026-03-30T11:00:00Z"},
+        },
+    ]
+
+    filtered = _filter_jobs(
+        jobs,
+        {"search": "agentic tooling", "location": "", "remote_only": False, "sort_by": "Best Match"},
+    )
+
+    assert [job["id"] for job in filtered] == ["1"]
+
+
+def test_filter_jobs_preserves_backend_order_when_backend_search_is_active() -> None:
+    jobs = [
+        {
+            "id": "1",
+            "title": "Chief of Staff",
+            "company": "Acme",
+            "location": "Remote",
+            "work_mode": "remote",
+            "description": "Exact title match.",
+            "explanation": "Strong fit.",
+            "source": "greenhouse",
+            "tags": ["fresh"],
+            "_search_document": {
+                "fields": {},
+                "haystack": "",
+                "recommendation_sort": 4.0,
+                "posted_at_sort": datetime(2026, 3, 24, tzinfo=timezone.utc),
+                "title": "Chief of Staff",
+                "company": "Acme",
+            },
+        },
+        {
+            "id": "2",
+            "title": "Operations Program Lead",
+            "company": "Beta",
+            "location": "Remote",
+            "work_mode": "remote",
+            "description": "Description-only match.",
+            "explanation": "Also relevant.",
+            "source": "ashby",
+            "tags": ["fresh"],
+            "_search_document": {
+                "fields": {},
+                "haystack": "",
+                "recommendation_sort": 9.0,
+                "posted_at_sort": datetime(2026, 3, 30, tzinfo=timezone.utc),
+                "title": "Operations Program Lead",
+                "company": "Beta",
+            },
+        },
+    ]
+
+    filtered = _filter_jobs(
+        jobs,
+        {"search": "chief of staff", "location": "", "remote_only": False, "sort_by": "Newest"},
+        search_meta={"query": "chief of staff", "status": "results", "result_count": 2, "backend_applied": True},
+    )
+
+    assert [job["id"] for job in filtered] == ["1", "2"]
+
+
+def test_filter_jobs_ranks_exact_title_match_above_weaker_description_match() -> None:
+    jobs = [
+        {
+            "id": "1",
+            "title": "Chief of Staff",
+            "company": "Acme",
+            "location": "Remote",
+            "work_mode": "remote",
+            "description": "Staff role for company operations.",
+            "explanation": "Strong fit.",
+            "source": "search_web",
+            "tags": ["fresh"],
+            "raw_lead": {"score_breakdown_json": {"final_score": 6.5}, "posted_at": "2026-03-28T10:00:00Z", "surfaced_at": "2026-03-28T11:00:00Z"},
+        },
+        {
+            "id": "2",
+            "title": "Operations Program Lead",
+            "company": "Beta",
+            "location": "Remote",
+            "work_mode": "remote",
+            "description": "This role partners closely with the chief of staff.",
+            "explanation": "Medium fit.",
+            "source": "greenhouse",
+            "tags": ["fresh"],
+            "raw_lead": {"score_breakdown_json": {"final_score": 9.2}, "posted_at": "2026-03-30T10:00:00Z", "surfaced_at": "2026-03-30T11:00:00Z"},
+        },
+    ]
+
+    filtered = _filter_jobs(
+        jobs,
+        {"search": "chief of staff", "location": "", "remote_only": False, "sort_by": "Best Match"},
+    )
+
+    assert [job["id"] for job in filtered] == ["1", "2"]
+
+
+def test_filter_jobs_does_not_match_placeholder_todo_rows() -> None:
+    jobs = [
+        {
+            "id": "1",
+            "title": "TODO title",
+            "company": "TODO company",
+            "location": "TODO location",
+            "work_mode": "TODO work mode",
+            "description": "TODO: backend did not return a short description.",
+            "explanation": "TODO: backend did not return a recommendation explanation.",
+            "source": "unknown",
+            "tags": [],
+            "raw_lead": {"score_breakdown_json": {"final_score": 0.0}, "posted_at": None, "surfaced_at": None},
+        }
+    ]
+
+    filtered = _filter_jobs(
+        jobs,
+        {"search": "todo", "location": "", "remote_only": False, "sort_by": "Best Match"},
+    )
+
+    assert filtered == []
 
 
 def test_build_jobs_empty_state_view_model_reports_running_search() -> None:
@@ -1094,6 +1660,40 @@ def test_build_onboarding_state_requires_resume_before_review() -> None:
     assert state["review_complete"] is False
     assert state["target_role_complete"] is False
     assert state["current_step"] == "resume"
+
+
+def test_resume_analysis_contract_explains_behavior_and_limits() -> None:
+    contract = ui_app.build_resume_analysis_contract_view_model()
+
+    assert "structured targeting fields" in contract["summary"]
+    assert any("skills and competencies" in item for item in contract["does"])
+    assert any("does not rewrite your resume" in item.lower() for item in contract["does_not"])
+
+
+def test_resume_analysis_feedback_reports_complete_and_partial_states() -> None:
+    complete = ui_app.build_resume_analysis_feedback(
+        {"status": "complete", "warnings": [], "missing_fields": []},
+        {"warnings": []},
+    )
+    partial = ui_app.build_resume_analysis_feedback(
+        {"status": "partial", "warnings": ["partial"], "missing_fields": ["preferred domains"]},
+        {"warnings": []},
+    )
+
+    assert complete["tone"] == "success"
+    assert "saved to your profile" in complete["message"]
+    assert partial["tone"] == "warning"
+    assert "Needs review: preferred domains." in partial["message"]
+
+
+def test_resume_failure_feedback_handles_unsupported_and_empty_sources() -> None:
+    unsupported = ui_app.build_resume_failure_feedback(ValueError("Unsupported file type. Upload a PDF, TXT, or MD resume."))
+    empty = ui_app.build_resume_failure_feedback(ValueError("PDF text extraction returned no readable text."))
+
+    assert unsupported["tone"] == "warning"
+    assert "supports PDF, TXT, and MD files only" in unsupported["message"]
+    assert empty["tone"] == "warning"
+    assert "could not find readable text" in empty["message"]
 
 
 def test_build_onboarding_state_allows_discovery_when_setup_is_deferred() -> None:

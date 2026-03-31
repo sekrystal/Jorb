@@ -12,6 +12,7 @@ from core.schemas import LeadResponse
 from core.models import AgentActivity, AgentRun, Base, CompanyDiscovery, Lead, Listing
 from core.schemas import SyncResult
 from services.company_discovery import build_discovery_status
+from services.lead_search import build_search_document
 from services.normalize import normalize_ashby_job, normalize_greenhouse_job, normalize_yc_job
 from services.discovery_agents import planner_agent
 from services.pipeline import ingest_user_job_link, recommendation_component_value, recommendation_score_value, run_scout_agent
@@ -101,6 +102,94 @@ def test_source_normalizers_map_into_shared_canonical_job_schema() -> None:
         assert record.canonical_job.source_type == expected_source
         assert record.location == expected_location
         assert (record.metadata_json or {})["canonical_job"] == record.canonical_job.model_dump()
+
+
+def test_source_normalizers_build_clean_structured_descriptions_across_sources() -> None:
+    greenhouse_record = normalize_greenhouse_job(
+        {
+            "company_name": "Acme",
+            "title": "Founding Operator",
+            "absolute_url": "https://job-boards.greenhouse.io/acme/jobs/123",
+            "location": {"name": "Remote US"},
+            "content": """
+                <div>Overview</div>
+                <p>Lead operating cadence and recruiting systems.</p>
+                <div>Responsibilities</div>
+                <ul>
+                  <li>Build recruiting systems</li>
+                  <li>Build recruiting systems</li>
+                </ul>
+                <script>analytics()</script>
+                <div>Apply for this job</div>
+            """,
+            "id": "123",
+        }
+    )
+    ashby_record = normalize_ashby_job(
+        {
+            "companyName": "Beta",
+            "title": "Chief of Staff",
+            "jobUrl": "https://jobs.ashbyhq.com/beta/456",
+            "location": {},
+            "descriptionHtml": """
+                <h2>Requirements</h2>
+                <ul><li>5+ years leading cross-functional programs</li></ul>
+                <h2>Benefits</h2>
+                <p>Medical, dental, and vision.</p>
+                <p>Medical, dental, and vision.</p>
+            """,
+            "id": "456",
+        }
+    )
+    yc_record = normalize_yc_job(
+        {
+            "company_name": "Gamma",
+            "title": "Business Operations Lead",
+            "url": "https://www.workatastartup.com/jobs/789",
+            "location": "",
+            "description_text": "Overview\nOwn planning cadence.\n\nResponsibilities\n- Run hiring systems\n- Run hiring systems",
+            "description_html": "<h2>Overview</h2><p>Own planning cadence.</p><h2>Responsibilities</h2><ul><li>Run hiring systems</li><li>Run hiring systems</li></ul>",
+            "source_job_id": "789",
+        }
+    )
+
+    for record in [greenhouse_record, ashby_record, yc_record]:
+        assert "<" not in (record.description_text or "")
+        assert "Apply for this job" not in (record.description_text or "")
+        assert "Responsibilities" in (record.description_text or "") or "Requirements" in (record.description_text or "")
+        assert (record.metadata_json or {})["description_sections"]
+        assert (record.metadata_json or {})["page_text"]
+
+    assert greenhouse_record.description_text.count("Build recruiting systems") == 1
+    assert ashby_record.description_text.count("Medical, dental, and vision.") == 1
+    assert yc_record.description_text.count("Run hiring systems") == 1
+
+
+def test_search_document_uses_cleaned_canonical_description_text() -> None:
+    record = normalize_greenhouse_job(
+        {
+            "company_name": "Acme",
+            "title": "Founding Operator",
+            "absolute_url": "https://job-boards.greenhouse.io/acme/jobs/123",
+            "location": {"name": "Remote US"},
+            "content": "<h2>Responsibilities</h2><ul><li>Build recruiting systems</li></ul>",
+            "id": "123",
+        }
+    )
+
+    document = build_search_document(
+        {
+            "title": record.title,
+            "company": record.company_name,
+            "location": record.location,
+            "description": record.description_text,
+            "source": record.source_type,
+            "tags": [],
+        }
+    )
+
+    assert "<li>" not in document["fields"]["description"]
+    assert "build recruiting systems" in document["fields"]["description"]
 
 
 def test_lead_response_normalizes_recommendation_score_schema_with_traceable_components() -> None:
@@ -410,6 +499,10 @@ def test_ingest_user_job_link_routes_manual_submission_through_listing_pipeline(
         "title": "Strategic Programs Lead",
         "location": "New York, NY",
         "source_type": "greenhouse",
+        "identity_key": "ramp::strategic-programs-lead::new-york-ny",
+        "company_key": "ramp",
+        "role_key": "strategic-programs-lead",
+        "location_key": "new-york-ny",
     }
 
 

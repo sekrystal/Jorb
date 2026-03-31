@@ -213,7 +213,7 @@ def test_pdf_resume_upload_extraction() -> None:
 def test_resume_preview_builds_structured_profile_from_upload() -> None:
     preview = preview_resume_upload(
         "resume.txt",
-        b"Chief of Staff focused on AI and developer tools in San Francisco at Series A startups.",
+        b"Chief of Staff focused on AI and developer tools in San Francisco at Series A startups with SQL, stakeholder management, and process design.",
     )
 
     assert preview["status"] == "complete"
@@ -221,7 +221,30 @@ def test_resume_preview_builds_structured_profile_from_upload() -> None:
     assert preview["candidate_profile"]["extracted_summary_json"]["resume_filename"] == "resume.txt"
     assert preview["candidate_profile"]["extracted_summary_json"]["extraction_status"] == "complete"
     assert preview["candidate_profile"]["structured_profile_json"]["targeting"]["preferred_titles"]
+    assert "sql" in preview["candidate_profile"]["confirmed_skills_json"]
+    assert "process design" in preview["candidate_profile"]["competencies_json"]
+    assert "sql" in preview["matched_terms"]["confirmed_skills"]
     assert "chief of staff" in preview["candidate_profile"]["preferred_titles_json"]
+
+
+def test_resume_ingestion_persists_skills_inside_structured_profile() -> None:
+    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine, expire_on_commit=False)()
+
+    result = ingest_resume(
+        session,
+        filename="resume.txt",
+        raw_text=(
+            "Chief of Staff with SQL, stakeholder management, customer discovery, "
+            "and process design experience in AI startups."
+        ),
+    )
+
+    targeting = result.candidate_profile.structured_profile_json.targeting
+    assert "sql" in targeting.confirmed_skills
+    assert "stakeholder management" in targeting.confirmed_skills
+    assert "process design" in targeting.competencies
 
 
 def test_resume_preview_marks_partial_extraction_without_failing() -> None:

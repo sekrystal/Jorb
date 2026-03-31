@@ -5,7 +5,7 @@ from functools import partial
 from time import perf_counter
 from collections import defaultdict
 from collections import Counter
-from typing import Optional
+from typing import Any, Optional
 from urllib.parse import urlparse
 
 from sqlalchemy import func, select
@@ -59,6 +59,7 @@ from services.discovery_agents import (
 from services.explain import build_explanation
 from services.extract_signal import extract_many
 from services.freshness import (
+    canonical_job_identity,
     classify_freshness_label,
     dedupe_listing_records,
     has_expired_pattern,
@@ -72,10 +73,26 @@ from services.profile import get_candidate_profile
 from services.query_learning import ensure_source_queries
 from services.ranking import infer_role_family, score_lead
 from services.resolve_company import get_or_create_company, queue_recheck, resolve_company_name
+from services.lead_search import SEARCH_FIELDS, build_search_document, match_search_document, normalize_search_query, search_sort_key
 from services.search_runs import record_search_run
 
 
 logger = get_logger(__name__)
+
+
+def _dedupe_preserve_order(values: list[str]) -> list[str]:
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        cleaned = str(value or "").strip()
+        if not cleaned:
+            continue
+        key = cleaned.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        ordered.append(cleaned)
+    return ordered
 
 
 def _bump_query_family_metric(
@@ -512,33 +529,42 @@ def _authoritative_listing_context(session: Session, lead: Lead, listing_cache: 
         "location": listing.location if listing else evidence.get("location"),
         "location_scope": metadata.get("location_scope") if listing else evidence.get("location_scope"),
         "metadata_json": metadata if listing else dict(evidence.get("listing_metadata_json") or {}),
+        "canonical_job_key": (
+            dict(metadata.get("canonical_job") or {}).get("identity_key")
+            if listing
+            else dict(evidence.get("listing_metadata_json") or {}).get("canonical_job", {}).get("identity_key")
+        ) or canonical_job_identity(lead.company_name, lead.primary_title, listing.location if listing else evidence.get("location")),
         "page_text": page_text or "",
         "http_status": http_status,
     }
 
 
-def _duplicate_winner_context(session: Session, leads: list[Lead], listing_cache: Optional[dict[int, Listing]] = None) -> dict[int, str]:
+def _duplicate_winner_context(
+    session: Session,
+    leads: list[Lead],
+    listing_cache: Optional[dict[int, Listing]] = None,
+) -> tuple[dict[int, str], dict[int, dict[str, Any]]]:
     freshness_order = {"fresh": 0, "recent": 1, "stale": 2, "unknown": 3}
     lead_type_order = {"combined": 0, "listing": 1, "signal": 2}
+    source_priority = {"greenhouse": 0, "ashby": 0, "yc_jobs": 1, "search_web": 2, "x": 3, "x_signal": 3}
     duplicate_groups: dict[tuple, list[Lead]] = defaultdict(list)
 
     for lead in leads:
         context = _authoritative_listing_context(session, lead, listing_cache=listing_cache)
         dedupe_key = (
-            lead.listing_id or None,
-            (context["url"] or "").lower(),
-            lead.company_name.lower(),
-            lead.primary_title.lower(),
+            context["canonical_job_key"],
         )
         duplicate_groups[dedupe_key].append(lead)
 
     losers: dict[int, str] = {}
+    winner_merges: dict[int, dict[str, Any]] = {}
     for grouped in duplicate_groups.values():
         if len(grouped) <= 1:
             continue
         ordered = sorted(
             grouped,
             key=lambda lead: (
+                source_priority.get(str((lead.evidence_json or {}).get("source_type") or "").lower(), 9),
                 lead_type_order.get(lead.lead_type, 9),
                 freshness_order.get(lead.freshness_label, 9),
                 -int(lead.updated_at.timestamp()) if lead.updated_at else 0,
@@ -546,9 +572,28 @@ def _duplicate_winner_context(session: Session, leads: list[Lead], listing_cache
             ),
         )
         winner = ordered[0]
+        merged_sources = _dedupe_preserve_order(
+            [
+                str((lead.evidence_json or {}).get("source_type") or "")
+                for lead in grouped
+                if str((lead.evidence_json or {}).get("source_type") or "").strip()
+            ]
+        )
+        merged_urls = _dedupe_preserve_order(
+            [
+                str((lead.evidence_json or {}).get("url") or "")
+                for lead in grouped
+                if str((lead.evidence_json or {}).get("url") or "").strip()
+            ]
+        )
+        winner_merges[winner.id] = {
+            "duplicate_count": len(grouped),
+            "merged_sources": merged_sources,
+            "merged_urls": merged_urls,
+        }
         for loser in ordered[1:]:
             losers[loser.id] = f"Duplicate of {winner.company_name} / {winner.primary_title}"
-    return losers
+    return losers, winner_merges
 
 
 def evaluate_critic_decision(
@@ -587,6 +632,15 @@ def evaluate_critic_decision(
     persisted_ai_critic = dict((lead.evidence_json or {}).get("ai_critic_assessment") or {}) or None
     ai_critic = persisted_ai_critic
     used_live_ai_call = False
+    user_dismissed_at = (lead.evidence_json or {}).get("user_dismissed_at")
+    user_hidden_reason = (lead.evidence_json or {}).get("user_hidden_reason")
+
+    if user_dismissed_at:
+        reasons.append(
+            f"Dismissed by user{f' ({user_hidden_reason})' if user_hidden_reason else ''}"
+        )
+        status = "hidden"
+        suppression_category = "user_dismissed"
 
     if lead.id in duplicate_losers:
         reasons.append(duplicate_losers[lead.id])
@@ -715,6 +769,11 @@ def evaluate_critic_decision(
         reasons.append(f"Qualification fit is {lead.qualification_fit_label}")
         status = "hidden"
         suppression_category = "qualification"
+
+    if (lead.score_breakdown_json or {}).get("match_tier") == "low" and status == "visible":
+        reasons.append("Match tier is low for the current resume and search profile")
+        status = "hidden"
+        suppression_category = "low_fit"
 
     if (lead.score_breakdown_json or {}).get("composite", 0.0) < profile.minimum_fit_threshold and status == "visible":
         reasons.append("Composite fit is below the candidate threshold")
@@ -859,6 +918,7 @@ def _upsert_lead(
         listing_status=listing_status,
         source_type=source_type,
         evidence_count=len(evidence_json.get("snippets", [])),
+        listing_metadata=dict(listing.metadata_json or {}) if listing else dict(evidence_json.get("listing_metadata_json") or {}),
         feedback_learning=feedback_learning,
     )
     candidate_context = profile.raw_resume_text or (profile.extracted_summary_json or {}).get("summary", "")
@@ -968,9 +1028,16 @@ def _upsert_lead(
             "work_mode_match": breakdown.get("work_mode_match"),
             "role_match_explanation": breakdown.get("role_match_explanation"),
             "location_fit_explanation": breakdown.get("location_fit_explanation"),
+            "top_matching_signals": breakdown.get("top_matching_signals", []),
+            "missing_signals": breakdown.get("missing_signals", []),
             "profile_constraints_applied": breakdown.get("applied_profile_constraints", []),
             "profile_constraints_defaulted": breakdown.get("defaulted_profile_constraints", []),
             "listing_metadata_json": dict(listing.metadata_json or {}) if listing else {},
+            "canonical_job_key": (
+                dict((listing.metadata_json or {}).get("canonical_job") or {}).get("identity_key")
+                if listing
+                else canonical_job_identity(company_name, title, location)
+            ),
             "url": listing_url,
             "first_published_at": listing.first_published_at.isoformat() if listing and listing.first_published_at else None,
             "discovered_at": listing.discovered_at.isoformat() if listing and listing.discovered_at else None,
@@ -1676,6 +1743,7 @@ def sync_all(
                 "apply_url": direct_job.apply_url,
                 "posted_at": direct_job.posted_at,
                 "description_text": direct_job.description_text,
+                "description_html": direct_job.description_html,
                 "source_job_id": payload["board_locator"],
                 "source_url": payload["result_url"],
                 "source_queries": [payload["query_text"]],
@@ -2578,8 +2646,44 @@ def sync_all(
         discovery_status=discovery_status,
     )
 
+def _apply_backend_search_contract(items: list[LeadResponse], q: Optional[str]) -> tuple[list[LeadResponse], Optional[dict[str, Any]]]:
+    normalized_query = normalize_search_query(q or "")
+    if not normalized_query["text"] and not normalized_query["tokens"]:
+        return items, None
+    matched_items: list[tuple[LeadResponse, dict[str, Any], dict[str, Any]]] = []
+    for item in items:
+        lead_payload = item.model_dump(mode="python") if hasattr(item, "model_dump") else item.dict()
+        document = build_search_document(lead_payload)
+        match = match_search_document(document, normalized_query)
+        if match is None:
+            continue
+        item.evidence_json = {
+            **(item.evidence_json or {}),
+            "search_match": {
+                "query": normalized_query["text"],
+                "matched_fields": match["matched_fields"],
+                "matched_tokens": match["matched_tokens"],
+                "score": match["score"],
+            },
+        }
+        matched_items.append((item, match, document))
+    matched_items.sort(key=lambda payload: search_sort_key(payload[2], payload[1]), reverse=True)
+    return [item for item, _match, _document in matched_items], {
+        "query": normalized_query["raw"],
+        "normalized_query": normalized_query["text"],
+        "tokens": normalized_query["tokens"],
+        "searched_fields": list(SEARCH_FIELDS),
+        "backend_applied": True,
+        "fallback_mode": "backend",
+        "partial_results": False,
+        "status": "results" if matched_items else "empty",
+        "candidate_count": len(items),
+        "result_count": len(matched_items),
+        "ranking": "match_score_then_recommendation_then_recency_then_title_then_company",
+    }
 
-def list_leads(
+
+def list_leads_payload(
     session: Session,
     freshness_window_days: Optional[int] = 14,
     include_hidden: bool = False,
@@ -2589,7 +2693,8 @@ def list_leads(
     only_applied: bool = False,
     status: Optional[str] = None,
     include_signal_only: bool = False,
-) -> list[LeadResponse]:
+    q: Optional[str] = None,
+) -> dict[str, Any]:
     started_at = perf_counter()
     settings = get_settings()
     rank_order = {"strong": 0, "medium": 1, "weak": 2}
@@ -2695,7 +2800,7 @@ def list_leads(
         _log_stage_timing("cheap_prefilter", prefilter_started_at, len(candidate_records))
 
         duplicate_started_at = perf_counter()
-        duplicate_losers = _duplicate_winner_context(session, candidate_records, listing_cache=listing_cache)
+        duplicate_losers, duplicate_winners = _duplicate_winner_context(session, candidate_records, listing_cache=listing_cache)
         _log_stage_timing("duplicate_detection", duplicate_started_at, len(candidate_records))
 
         def _evaluate_location_policy(lead: Lead, location: Optional[str]) -> dict:
@@ -2768,6 +2873,14 @@ def list_leads(
             serialization_started = perf_counter()
             response_evidence = dict(evidence)
             listing_metadata = dict((authoritative_listing.metadata_json or {})) if authoritative_listing else {}
+            if authoritative_listing and authoritative_listing.description_text and not response_evidence.get("description_text"):
+                response_evidence["description_text"] = authoritative_listing.description_text
+            if authoritative_listing and authoritative_listing.location and not response_evidence.get("location"):
+                response_evidence["location"] = authoritative_listing.location
+            if listing_metadata.get("description_sections") and not response_evidence.get("description_sections"):
+                response_evidence["description_sections"] = listing_metadata.get("description_sections")
+            if listing_metadata.get("description_summary") and not response_evidence.get("description_summary"):
+                response_evidence["description_summary"] = listing_metadata.get("description_summary")
             response_evidence["discovery_source"] = response_evidence.get("discovery_source") or listing_metadata.get("discovery_source")
             response_evidence["source_provenance"] = response_evidence.get("source_provenance") or listing_metadata.get("surface_provenance")
             response_evidence["source_lineage"] = response_evidence.get("source_lineage") or listing_metadata.get("source_lineage") or response_evidence.get("source_platform")
@@ -2785,6 +2898,8 @@ def list_leads(
             response_evidence["discovered_at"] = _isoformat_utc(decision["discovered_at"])
             response_evidence["last_seen_at"] = _isoformat_utc(decision["last_seen_at"])
             response_evidence["updated_at"] = _isoformat_utc(decision["updated_at"])
+            if lead.id in duplicate_winners:
+                response_evidence["duplicate_merge"] = duplicate_winners[lead.id]
 
             items.append(
                 LeadResponse(
@@ -2813,6 +2928,7 @@ def list_leads(
                     source_lineage=response_evidence.get("source_lineage", response_evidence.get("source_platform", source_type)),
                     discovery_source=response_evidence.get("discovery_source"),
                     saved=saved,
+                    seen=bool((lead.evidence_json or {}).get("user_seen_at")),
                     applied=applied,
                     current_status=current_status,
                     date_saved=_ensure_utc_datetime(application.date_saved) if application else None,
@@ -2842,16 +2958,19 @@ def list_leads(
                 "omitted_by_category": dict(omitted_by_category),
             },
         )
-        return sorted(
+        ordered_items = sorted(
             items,
             key=lambda item: (
                 rank_order.get(item.rank_label, 3),
+                -(float((item.score_breakdown_json or {}).get("final_score", (item.score_breakdown_json or {}).get("composite", 0.0)) or 0.0)),
                 lead_type_order.get(item.lead_type, 3),
                 freshness_order.get(item.freshness_label, 4),
                 recency_value(item),
                 item.company_name.lower(),
             ),
         )
+        searched_items, search_meta = _apply_backend_search_contract(ordered_items, q)
+        return {"items": searched_items, "search_meta": search_meta}
     finally:
         if critic_stage_started_at is not None and total_considered == 0:
             _log_stage_timing("critic_filter", critic_stage_started_at, total_considered)
@@ -2888,7 +3007,33 @@ def list_leads(
             },
         )
 
-    return []
+    return {"items": [], "search_meta": None}
+
+
+def list_leads(
+    session: Session,
+    freshness_window_days: Optional[int] = 14,
+    include_hidden: bool = False,
+    include_unqualified: bool = False,
+    lead_type: Optional[str] = None,
+    only_saved: bool = False,
+    only_applied: bool = False,
+    status: Optional[str] = None,
+    include_signal_only: bool = False,
+    q: Optional[str] = None,
+) -> list[LeadResponse]:
+    return list_leads_payload(
+        session=session,
+        freshness_window_days=freshness_window_days,
+        include_hidden=include_hidden,
+        include_unqualified=include_unqualified,
+        lead_type=lead_type,
+        only_saved=only_saved,
+        only_applied=only_applied,
+        status=status,
+        include_signal_only=include_signal_only,
+        q=q,
+    )["items"]
 
 
 def get_stats(session: Session) -> StatsResponse:

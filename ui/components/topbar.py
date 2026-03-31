@@ -29,6 +29,39 @@ def count_active_job_filters(*, search: str, location: str, remote_only: bool) -
     return int(bool(search.strip())) + int(bool(location.strip())) + int(bool(remote_only))
 
 
+def build_jobs_page_header_copy(*, title: str) -> dict[str, str]:
+    normalized = str(title or "").strip().lower()
+    if normalized == "jobs":
+        return {
+            "eyebrow": "Workspace",
+            "title": "Jobs",
+            "description": "Review ranked opportunities, narrow the list quickly, and open one clear detail view at a time.",
+        }
+    if normalized == "saved":
+        return {
+            "eyebrow": "Workspace",
+            "title": "Saved",
+            "description": "Keep promising jobs in a focused shortlist before you decide whether to apply.",
+        }
+    if normalized == "applied":
+        return {
+            "eyebrow": "Workspace",
+            "title": "Applied",
+            "description": "Track jobs you have already acted on without mixing them into the active queue.",
+        }
+    if normalized == "dismissed":
+        return {
+            "eyebrow": "Workspace",
+            "title": "Dismissed",
+            "description": "Review jobs hidden from active views and restore only the ones you want back.",
+        }
+    return {
+        "eyebrow": "Workspace",
+        "title": title,
+        "description": "Review the current jobs list with the same ranking and filtering controls used across the workbench.",
+    }
+
+
 def build_jobs_filters_panel_copy(*, active_filter_count: int) -> dict[str, str]:
     if active_filter_count == 0:
         return {
@@ -67,6 +100,7 @@ def render_jobs_topbar(
         remote_only=remote_value,
     )
     panel_copy = build_jobs_filters_panel_copy(active_filter_count=active_filter_count)
+    header_copy = build_jobs_page_header_copy(title=title)
 
     st.markdown(
         """
@@ -75,25 +109,42 @@ def render_jobs_topbar(
             background: #ffffff;
             border: 1px solid rgba(15, 23, 42, 0.08);
             border-radius: 1rem;
-            padding: 1rem;
-            margin-bottom: 0.75rem;
+            padding: 1.05rem 1.1rem;
+            margin-bottom: 0.85rem;
+        }
+        .jorb-topbar-eyebrow {
+            font-size: 0.74rem;
+            font-weight: 700;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            color: #475569;
+            margin-bottom: 0.2rem;
         }
         .jorb-topbar-title {
-            font-size: 1rem;
-            font-weight: 600;
+            font-size: 1.25rem;
+            line-height: 1.25;
+            font-weight: 700;
             color: #111827;
+        }
+        .jorb-topbar-description {
+            margin-top: 0.35rem;
+            color: #475569;
+            font-size: 0.92rem;
+            line-height: 1.45;
+            max-width: 48rem;
         }
         .jorb-topbar-meta {
             text-align: right;
             color: #6b7280;
             font-size: 0.85rem;
             padding-top: 0.15rem;
+            white-space: nowrap;
         }
         .jorb-filters-shell {
             background: #ffffff;
             border: 1px solid rgba(15, 23, 42, 0.08);
             border-radius: 1rem;
-            padding: 1rem;
+            padding: 1rem 1.05rem;
             margin-bottom: 1rem;
         }
         .jorb-filters-eyebrow {
@@ -127,8 +178,15 @@ def render_jobs_topbar(
         unsafe_allow_html=True,
     )
     st.markdown('<div class="jorb-topbar-header">', unsafe_allow_html=True)
-    header = st.columns([3, 1])
-    header[0].markdown(f'<div class="jorb-topbar-title">{title}</div>', unsafe_allow_html=True)
+    header = st.columns([3.4, 1])
+    header[0].markdown(
+        (
+            f'<div class="jorb-topbar-eyebrow">{header_copy["eyebrow"]}</div>'
+            f'<div class="jorb-topbar-title">{header_copy["title"]}</div>'
+            f'<div class="jorb-topbar-description">{header_copy["description"]}</div>'
+        ),
+        unsafe_allow_html=True,
+    )
     header[1].markdown(
         f'<div class="jorb-topbar-meta">Last updated: {_relative_time_label(last_updated)}</div>',
         unsafe_allow_html=True,

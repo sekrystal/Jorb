@@ -6,7 +6,7 @@ from typing import Any
 import streamlit as st
 
 
-PRIMARY_PAGES = ["Jobs", "Saved", "Applied", "Profile"]
+PRIMARY_PAGES = ["Jobs", "Saved", "Applied", "Dismissed", "Profile"]
 OPERATOR_PAGES = ["Discovery", "Agent Activity", "Investigations", "Learning", "Autonomy Ops"]
 
 
@@ -67,6 +67,14 @@ def _render_sidebar_chrome(*, title: str, caption: str) -> None:
             background: #ffffff;
             margin-top: 1rem;
         }
+        section[data-testid="stSidebar"] .jorb-sidebar-section {
+            font-size: 0.72rem;
+            font-weight: 700;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            color: #6b7280;
+            margin: 1rem 0 0.35rem 0;
+        }
         section[data-testid="stSidebar"] .jorb-system-label {
             font-size: 0.72rem;
             letter-spacing: 0.04em;
@@ -124,6 +132,7 @@ def render_sidebar(
     health: dict[str, Any] | None,
 ) -> tuple[str, bool]:
     _render_sidebar_chrome(title="Jorb", caption="Jobs-first workbench")
+    st.sidebar.markdown('<div class="jorb-sidebar-section">Workspace</div>', unsafe_allow_html=True)
     primary_page = st.sidebar.radio("Navigate", PRIMARY_PAGES, index=0, label_visibility="collapsed")
     _render_system_status(stats=stats, runtime=runtime, health=health)
     with st.sidebar.expander("Workspace tools", expanded=False):
@@ -139,6 +148,7 @@ def render_operator_sidebar(
     health: dict[str, Any] | None,
 ) -> tuple[str, bool]:
     _render_sidebar_chrome(title="Jorb Operator", caption="Diagnostics and runtime control")
+    st.sidebar.markdown('<div class="jorb-sidebar-section">Operator views</div>', unsafe_allow_html=True)
     operator_page = st.sidebar.radio("Operator navigate", OPERATOR_PAGES, index=0, label_visibility="collapsed")
     _render_system_status(stats=stats, runtime=runtime, health=health)
     back_to_jobs = st.sidebar.button("Back to jobs shell", use_container_width=True)
