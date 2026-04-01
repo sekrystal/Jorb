@@ -341,6 +341,25 @@ def build_search_state_view_model(
             "detail": f"The latest run ended with {reason} at {created_label}.",
         }
 
+    if status == "disabled":
+        reason = search_run.get("failure_classification") or search_run.get("error") or "search_disabled"
+        return {
+            "tone": "error",
+            "eyebrow": "Search",
+            "badge": "Unavailable",
+            "title": "Live job discovery is unavailable.",
+            "detail": f"The latest run could not execute live search because {reason} at {created_label}.",
+        }
+
+    if status == "not_run":
+        return {
+            "tone": "info",
+            "eyebrow": "Search",
+            "badge": "Idle",
+            "title": "Search has not run yet.",
+            "detail": "Refresh jobs to load this view.",
+        }
+
     if status in {"queued", "running", "started"}:
         return {
             "tone": "info",

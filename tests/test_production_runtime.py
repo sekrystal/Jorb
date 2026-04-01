@@ -18,6 +18,7 @@ from core.time import utcnow
 from services.alerts import evaluate_alerts
 from services.connectors_health import record_connector_failure, record_connector_success
 from services.ops import can_add_watchlist_items_today, can_create_generated_queries_today, get_runtime_connector_set
+from services.search_runs import record_search_run
 
 
 def build_session():
@@ -255,6 +256,27 @@ def test_search_runs_latest_http_endpoint_returns_latest_run_payload() -> None:
         "diagnostics_json": {"status": "results"},
         "created_at": latest.created_at.isoformat().replace("+00:00", "Z"),
     }
+
+
+def test_record_search_run_does_not_mark_disabled_search_as_zero_yield() -> None:
+    session = build_session()
+    execution = type(
+        "Execution",
+        (),
+        {
+            "worker_name": "search",
+            "live": False,
+            "query_texts": ['"chief of staff" careers'],
+            "results": [],
+            "diagnostics": {"status": "disabled", "failure_classification": "search_disabled", "error": "Search discovery disabled"},
+        },
+    )()
+
+    row = record_search_run(session, execution)
+
+    assert row.status == "disabled"
+    assert row.zero_yield is False
+    assert row.failure_classification == "search_disabled"
 
 
 def test_manual_search_http_endpoint_runs_sync_and_returns_payload(monkeypatch) -> None:

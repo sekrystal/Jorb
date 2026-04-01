@@ -21,13 +21,14 @@ def record_search_run(
     provider: str | None = None,
 ) -> SearchRun:
     diagnostics = dict(execution.diagnostics or {})
+    status = str(diagnostics.get("status") or ("results" if execution.results else "empty"))
     row = SearchRun(
         source_key=source_key,
         worker_name=execution.worker_name,
         provider=provider or get_settings().search_discovery_provider,
-        status=str(diagnostics.get("status") or ("results" if execution.results else "empty")),
+        status=status,
         live=bool(execution.live),
-        zero_yield=(len(execution.query_texts) > 0 and len(execution.results) == 0),
+        zero_yield=(len(execution.query_texts) > 0 and len(execution.results) == 0 and status in {"empty", "zero_yield"}),
         query_count=len(execution.query_texts),
         result_count=len(execution.results),
         queries_json=list(execution.query_texts),

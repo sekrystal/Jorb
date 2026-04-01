@@ -1161,3 +1161,32 @@ def test_build_discovery_status_reports_latest_live_discovery_failure() -> None:
     assert status.agentic_slice_status["failed_workers"] == ["search"]
     assert "search request timed out" in status.agentic_slice_status["summary"]
     assert '"chief of staff" startup careers' in status.agentic_slice_status["summary"]
+
+
+def test_build_discovery_status_falls_back_to_latest_search_run_truth_when_cycle_metrics_are_missing() -> None:
+    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine, expire_on_commit=False)()
+    session.add(
+        SearchRun(
+            source_key="search_web",
+            worker_name="search",
+            provider="duckduckgo_html",
+            status="failed",
+            live=True,
+            query_count=1,
+            result_count=0,
+            queries_json=['"chief of staff" startup careers'],
+            failure_classification="search_timeout",
+            error="search request timed out",
+            diagnostics_json={"status": "failed", "failure_classification": "search_timeout", "error": "search request timed out"},
+        )
+    )
+    session.commit()
+
+    status = build_discovery_status(session)
+
+    assert status.agentic_slice_status["status"] == "live_discovery_failed"
+    assert status.agentic_slice_status["failure_classification"] == "search_timeout"
+    assert "search request timed out" in status.agentic_slice_status["summary"]
+    assert '"chief of staff" startup careers' in status.agentic_slice_status["summary"]

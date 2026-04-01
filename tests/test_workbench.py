@@ -1725,6 +1725,23 @@ def test_build_jobs_empty_state_view_model_reports_live_discovery_failure() -> N
     assert "search request timed out" in view_model["detail"]
 
 
+def test_build_search_state_view_model_reports_disabled_live_discovery_state() -> None:
+    view_model = build_search_state_view_model(
+        {
+            "status": "disabled",
+            "query_count": 1,
+            "result_count": 0,
+            "failure_classification": "search_disabled",
+            "created_at": "2026-03-29T12:30:00Z",
+        }
+    )
+
+    assert view_model["tone"] == "error"
+    assert view_model["badge"] == "Unavailable"
+    assert view_model["title"] == "Live job discovery is unavailable."
+    assert "search_disabled" in view_model["detail"]
+
+
 def test_build_jobs_empty_state_view_model_uses_search_run_truth_for_zero_results() -> None:
     view_model = build_jobs_empty_state_view_model(
         {

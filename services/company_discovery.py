@@ -604,6 +604,14 @@ def _agentic_slice_status(
     source_matrix: list[dict[str, object]] | list[DiscoverySourceMatrixRow],
     recent_search_runs: list[object] | None = None,
 ) -> dict[str, object]:
+    latest_search_run = next(
+        (
+            run for run in list(recent_search_runs or [])
+            if str(getattr(run, "source_key", "") or "").strip().lower() in {"search_web", "search_web_ats"}
+        ),
+        None,
+    )
+
     if agentic_leads:
         return {
             "status": "verified_jobs_available",
@@ -664,6 +672,85 @@ def _agentic_slice_status(
             "failure_classification": failure_classification,
             "error": error or None,
             "failed_workers": failed_workers,
+        }
+
+    latest_search_status = str(getattr(latest_search_run, "status", "") or "").strip().lower()
+    latest_search_diagnostics = dict(getattr(latest_search_run, "diagnostics_json", {}) or {})
+    if latest_search_status in {"failed", "error"}:
+        failure_classification = str(
+            getattr(latest_search_run, "failure_classification", None)
+            or latest_search_diagnostics.get("failure_classification")
+            or "search_runtime_error"
+        ).strip() or "search_runtime_error"
+        error = str(
+            getattr(latest_search_run, "error", None)
+            or latest_search_diagnostics.get("error")
+            or ""
+        ).strip()
+        run_queries = list(getattr(latest_search_run, "queries", []) or [])
+        summary_parts = ["Live job discovery failed in the latest persisted search run."]
+        summary_parts.append(f"Failure: {failure_classification}.")
+        if error:
+            summary_parts.append(f"Error: {error}.")
+        if run_queries:
+            summary_parts.append(f"Latest failed query: {run_queries[0]}.")
+        summary_parts.append("Check connector health and retry after fixing the runtime issue.")
+        return {
+            "status": "live_discovery_failed",
+            "summary": " ".join(summary_parts),
+            "verified_jobs": 0,
+            "zero_yield": False,
+            "live_runnable": True,
+            "failure_classification": failure_classification,
+            "error": error or None,
+            "failed_workers": [str(getattr(latest_search_run, "worker_name", "search") or "search")],
+        }
+
+    if latest_search_status == "disabled":
+        failure_classification = str(
+            getattr(latest_search_run, "failure_classification", None)
+            or latest_search_diagnostics.get("failure_classification")
+            or "search_disabled"
+        ).strip() or "search_disabled"
+        error = str(
+            getattr(latest_search_run, "error", None)
+            or latest_search_diagnostics.get("error")
+            or "Live search discovery is disabled in the current runtime."
+        ).strip()
+        return {
+            "status": "live_discovery_unavailable",
+            "summary": f"Live job discovery is not runnable in this environment. Latest persisted search status: {failure_classification}. {error}",
+            "verified_jobs": 0,
+            "zero_yield": False,
+            "live_runnable": False,
+            "blocked_live_sources": [],
+            "demo_only_sources": [],
+        }
+
+    if latest_search_status in {"empty", "zero_yield"} or (
+        bool(getattr(latest_search_run, "zero_yield", False)) and latest_search_status not in {"failed", "error", "disabled"}
+    ):
+        run_queries = list(getattr(latest_search_run, "queries", []) or [])
+        attempts = int(
+            latest_search_diagnostics.get("zero_yield_attempt_count")
+            or len(latest_search_diagnostics.get("zero_yield_queries") or [])
+            or len(run_queries)
+            or 0
+        )
+        reason = str(
+            getattr(latest_search_run, "failure_classification", None)
+            or latest_search_diagnostics.get("failure_classification")
+            or getattr(latest_search_run, "error", None)
+            or latest_search_diagnostics.get("error")
+            or "search provider returned no accepted results"
+        ).strip()
+        return {
+            "status": "zero_yield",
+            "summary": f"Zero verified jobs this cycle. Search discovery returned no accepted results after {attempts} attempt(s): {reason}.",
+            "verified_jobs": 0,
+            "zero_yield": True,
+            "reason": reason,
+            "zero_yield_attempt_count": attempts,
         }
 
     live_state = _live_job_discovery_state(source_matrix)
