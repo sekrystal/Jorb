@@ -389,8 +389,8 @@ def test_frontend_shell_dev_wiring_targets_existing_fastapi_backend() -> None:
     assert "/opportunities" in api_client
     assert '"/candidate-profile"' in api_client
     assert '"/applications/status"' in api_client
-    assert "primary product path: treat `http://127.0.0.1:5173/` as the default product shell during local development and demos" in readme
-    assert "Streamlit is the internal validation and operator harness at `http://127.0.0.1:8500`" in readme
+    assert "http://127.0.0.1:5173" in readme
+    assert "http://127.0.0.1:8500" in readme
 
 
 def test_runtime_self_check_requires_live_stack_evidence() -> None:

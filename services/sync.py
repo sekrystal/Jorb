@@ -259,6 +259,63 @@ def _search_zero_yield_summary(search_diagnostics: dict[str, object]) -> dict[st
     }
 
 
+def _build_discovery_summary(
+    *,
+    discovery_metrics: dict[str, dict[str, int]],
+    surfaced_count: int,
+    source_matrix: list[dict[str, object]],
+    cycle_metrics: dict[str, object],
+) -> str:
+    automatic_source_keys = {"greenhouse", "ashby", "search_web", "search_web_scrape_fallback", "x_search"}
+    unavailable_automatic_sources = [
+        str(row.get("label") or row.get("source_key") or "Unknown source")
+        for row in source_matrix
+        if row.get("source_key") in automatic_source_keys and row.get("classification") == "not_working"
+    ]
+    runnable_automatic_sources = [
+        str(row.get("label") or row.get("source_key") or "Unknown source")
+        for row in source_matrix
+        if row.get("source_key") in automatic_source_keys and row.get("classification") in {"working", "partially_working"}
+    ]
+    search_zero_yield = dict(cycle_metrics.get("search_zero_yield") or {})
+    zero_yield_reason = str(search_zero_yield.get("reason") or "").strip()
+    zero_yield_attempts = int(search_zero_yield.get("zero_yield_attempt_count", 0) or 0)
+
+    if (
+        discovery_metrics.get("greenhouse", {}).get("verified", 0) == 0
+        and discovery_metrics.get("ashby", {}).get("verified", 0) == 0
+        and discovery_metrics.get("search_web", {}).get("raw", 0) > 0
+        and surfaced_count == 0
+    ):
+        return "Jobs were discovered but all were filtered out before surfacing."
+
+    if all(item.get("raw", 0) == 0 for item in discovery_metrics.values()):
+        if zero_yield_reason:
+            summary = (
+                "No jobs found from any connector. "
+                f"Search discovery returned no accepted results after {zero_yield_attempts} attempt(s): {zero_yield_reason}."
+            )
+            if unavailable_automatic_sources:
+                summary += f" Unavailable sources this cycle: {', '.join(unavailable_automatic_sources)}."
+            return summary
+        if not runnable_automatic_sources:
+            return (
+                "No jobs found from any connector. "
+                f"Automatic discovery is not runnable: {', '.join(unavailable_automatic_sources)}."
+            )
+        if unavailable_automatic_sources:
+            return (
+                "No jobs found from any connector. "
+                f"Unavailable sources this cycle: {', '.join(unavailable_automatic_sources)}."
+            )
+        return "No jobs found from any connector."
+
+    if surfaced_count > 0:
+        return "Jobs found and surfaced normally."
+
+    return "Discovery completed without surfacing verified jobs."
+
+
 def _expansion_fallback_diagnostics(
     candidate,
     row: CompanyDiscovery,
@@ -2591,37 +2648,16 @@ def sync_all(
         if row["source_key"] in {"greenhouse", "ashby", "search_web", "search_web_scrape_fallback", "x_search"}
         and row["classification"] == "not_working"
     ]
-    runnable_automatic_sources = [
-        row["label"]
-        for row in source_matrix
-        if row["source_key"] in {"greenhouse", "ashby", "search_web", "search_web_scrape_fallback", "x_search"}
-        and row["classification"] in {"working", "partially_working"}
-    ]
-    discovery_summary = None
-    if (
-        discovery_metrics.get("greenhouse", {}).get("verified", 0) == 0
-        and discovery_metrics.get("ashby", {}).get("verified", 0) == 0
-        and discovery_metrics.get("search_web", {}).get("raw", 0) > 0
-        and surfaced_count == 0
-    ):
-        discovery_summary = "Jobs were discovered but all were filtered out before surfacing."
+    discovery_summary = _build_discovery_summary(
+        discovery_metrics=discovery_metrics,
+        surfaced_count=surfaced_count,
+        source_matrix=source_matrix,
+        cycle_metrics=dict(cycle_metrics),
+    )
+    if discovery_summary == "Jobs were discovered but all were filtered out before surfacing.":
         logger.error("[DISCOVERY_FAILURE] No high-signal jobs. Only weak signals found and filtered out.")
-    elif all(item.get("raw", 0) == 0 for item in discovery_metrics.values()):
-        if not runnable_automatic_sources:
-            discovery_summary = (
-                "No jobs found from any connector. "
-                f"Automatic discovery is not runnable: {', '.join(unavailable_automatic_sources)}."
-            )
-        elif unavailable_automatic_sources:
-            discovery_summary = (
-                "No jobs found from any connector. "
-                f"Unavailable sources this cycle: {', '.join(unavailable_automatic_sources)}."
-            )
-        else:
-            discovery_summary = "No jobs found from any connector."
+    elif discovery_summary.startswith("No jobs found from any connector."):
         logger.error("[DISCOVERY_FAILURE] No jobs found from any source.")
-    elif surfaced_count > 0:
-        discovery_summary = "Jobs found and surfaced normally."
     discovery_status = {
         "new_companies_discovered": new_discovery_count,
         "companies_selected_for_expansion": len(selected_discoveries),

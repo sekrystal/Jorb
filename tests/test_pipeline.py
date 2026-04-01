@@ -17,7 +17,7 @@ from services.normalize import normalize_ashby_job, normalize_greenhouse_job, no
 from services.discovery_agents import planner_agent
 from services.pipeline import ingest_user_job_link, recommendation_component_value, recommendation_score_value, run_scout_agent
 from services.profile import ingest_resume, update_candidate_profile
-from services.sync import sync_all
+from services.sync import _build_discovery_summary, sync_all
 from services.explain import build_explanation
 
 
@@ -445,6 +445,31 @@ def test_run_scout_agent_records_high_evergreen_temporal_intelligence_for_old_ac
     assert intelligence["evergreen_likelihood"] == "high"
     assert "always hiring" in intelligence["evergreen_signals"]
     assert "evergreen_high=1" in result.summary
+
+
+def test_build_discovery_summary_surfaces_zero_yield_reason_and_unavailable_sources() -> None:
+    summary = _build_discovery_summary(
+        discovery_metrics={
+            "greenhouse": {"raw": 0, "verified": 0},
+            "ashby": {"raw": 0, "verified": 0},
+            "search_web": {"raw": 0, "verified": 0},
+            "x_search": {"raw": 0, "verified": 0},
+        },
+        surfaced_count=0,
+        source_matrix=[
+            {"source_key": "search_web", "label": "Search Web", "classification": "partially_working"},
+            {"source_key": "greenhouse", "label": "Greenhouse", "classification": "not_working"},
+        ],
+        cycle_metrics={
+            "search_zero_yield": {
+                "reason": "provider self-links only",
+                "zero_yield_attempt_count": 2,
+            }
+        },
+    )
+
+    assert "Search discovery returned no accepted results after 2 attempt(s): provider self-links only." in summary
+    assert "Unavailable sources this cycle: Greenhouse." in summary
 
 
 def test_ingest_user_job_link_routes_manual_submission_through_listing_pipeline() -> None:

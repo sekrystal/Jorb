@@ -1749,9 +1749,11 @@ def main() -> None:
         )
         leads = jobs_payload["items"]
         latest_search_run = fetch_optional_json("/search-runs/latest")
+        discovery_status = fetch_optional_json("/discovery-status")
         render_jobs_screen(
             leads=leads,
             search_run=latest_search_run,
+            discovery_status=discovery_status,
             search_meta=jobs_payload.get("search_meta"),
             page_key="jobs",
             title="Jobs",

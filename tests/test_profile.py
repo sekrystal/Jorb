@@ -128,6 +128,7 @@ def test_update_candidate_profile_syncs_structured_schema_back_to_flat_fields() 
         "preferred_locations": ["san francisco"],
         "work_mode_preference": "hybrid",
         "seniority_guess": "senior",
+        "years_experience": None,
         "min_seniority_band": "mid",
         "max_seniority_band": "staff",
         "applied_constraints": ["geography", "target_roles", "work_mode"],

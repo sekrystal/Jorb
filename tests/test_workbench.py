@@ -1267,7 +1267,7 @@ def test_build_manual_search_feedback_reports_surfaced_jobs() -> None:
 
     assert feedback == {
         "tone": "success",
-        "message": "Refresh finished. Surfaced 2 jobs.",
+        "message": "Refresh finished. Surfaced 2 jobs. Jobs found and surfaced normally.",
     }
 
 
@@ -1281,8 +1281,52 @@ def test_build_manual_search_feedback_reports_zero_yield_summary() -> None:
 
     assert feedback == {
         "tone": "warning",
-        "message": "Refresh finished. Surfaced 0 jobs.",
+        "message": "Refresh finished. Surfaced 0 jobs. No jobs found from any connector.",
     }
+
+
+def test_build_search_state_view_model_reports_blocked_automatic_discovery() -> None:
+    view_model = build_search_state_view_model(
+        None,
+        discovery_status={
+            "agentic_slice_status": {
+                "status": "no_verified_jobs",
+                "summary": "No verified search-discovered jobs are currently available in the UI.",
+            },
+            "source_matrix": [
+                {"source_key": "greenhouse", "label": "Greenhouse", "classification": "not_working", "failed": False},
+                {"source_key": "ashby", "label": "Ashby", "classification": "not_working", "failed": False},
+                {"source_key": "search_web", "label": "Search Web", "classification": "not_working", "failed": False},
+                {"source_key": "search_web_scrape_fallback", "label": "Scrape Fallback", "classification": "not_working", "failed": False},
+                {"source_key": "x_search", "label": "X Search", "classification": "not_working", "failed": False},
+            ],
+        },
+    )
+
+    assert view_model["tone"] == "error"
+    assert view_model["title"] == "Automatic discovery is not runnable."
+    assert "Automatic discovery is currently blocked" in view_model["detail"]
+
+
+def test_build_jobs_empty_state_view_model_uses_discovery_zero_yield_status() -> None:
+    view_model = build_jobs_empty_state_view_model(
+        None,
+        total_job_count=0,
+        filters={"search": "", "location": "", "remote_only": False},
+        discovery_status={
+            "agentic_slice_status": {
+                "status": "zero_yield",
+                "summary": "Zero verified jobs this cycle. Search discovery returned no accepted results after 3 attempt(s): provider self-links only.",
+            },
+            "source_matrix": [
+                {"source_key": "search_web", "label": "Search Web", "classification": "partially_working", "failed": False},
+            ],
+        },
+    )
+
+    assert view_model["tone"] == "warning"
+    assert view_model["title"] == "Discovery ran but found no verified jobs."
+    assert "provider self-links only" in view_model["detail"]
 
 
 def test_build_jobs_empty_state_view_model_reports_filter_hidden_results() -> None:

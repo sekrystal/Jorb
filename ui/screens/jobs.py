@@ -129,10 +129,36 @@ def _format_search_fields(search_meta: dict[str, Any]) -> str:
     return ", ".join(fields)
 
 
+def _automatic_source_rows(discovery_status: dict[str, Any] | None) -> list[dict[str, Any]]:
+    source_matrix = list((discovery_status or {}).get("source_matrix") or [])
+    automatic_source_keys = {"greenhouse", "ashby", "search_web", "search_web_scrape_fallback", "x_search"}
+    return [row for row in source_matrix if str(row.get("source_key") or "") in automatic_source_keys]
+
+
+def _discovery_failure_detail(discovery_status: dict[str, Any] | None) -> str | None:
+    automatic_rows = _automatic_source_rows(discovery_status)
+    blocked_sources = [
+        str(row.get("label") or row.get("source_key") or "Unknown source")
+        for row in automatic_rows
+        if str(row.get("classification") or "") == "not_working"
+    ]
+    failed_sources = [
+        str(row.get("label") or row.get("source_key") or "Unknown source")
+        for row in automatic_rows
+        if bool(row.get("failed"))
+    ]
+    if blocked_sources and len(blocked_sources) == len(automatic_rows):
+        return f"Automatic discovery is currently blocked: {', '.join(blocked_sources)}."
+    if failed_sources:
+        return f"Automatic discovery hit failures in: {', '.join(failed_sources)}."
+    return None
+
+
 def build_search_state_view_model(
     search_run: dict[str, Any] | None,
     *,
     search_meta: dict[str, Any] | None = None,
+    discovery_status: dict[str, Any] | None = None,
     visible_job_count: int | None = None,
 ) -> dict[str, str]:
     if search_meta and str(search_meta.get("query") or "").strip():
@@ -179,6 +205,53 @@ def build_search_state_view_model(
             "title": "Search results loaded.",
             "detail": detail,
         }
+
+    discovery_slice = dict((discovery_status or {}).get("agentic_slice_status") or {})
+    if discovery_slice:
+        status = str(discovery_slice.get("status") or "").strip().lower()
+        summary = str(discovery_slice.get("summary") or "").strip()
+        failure_detail = _discovery_failure_detail(discovery_status)
+        if status == "verified_jobs_available":
+            verified_jobs = int(discovery_slice.get("verified_jobs") or 0)
+            detail = summary or f"{verified_jobs} verified search-discovered job(s) are ready in the UI."
+            if visible_job_count is not None and visible_job_count < verified_jobs:
+                detail += f" {visible_job_count} remain in view after local filters."
+            return {
+                "tone": "success",
+                "eyebrow": "Discovery",
+                "badge": "Working",
+                "title": "Live discovery is returning verified jobs.",
+                "detail": detail,
+            }
+        if failure_detail:
+            detail = summary
+            if summary and failure_detail not in summary:
+                detail = f"{summary} {failure_detail}".strip()
+            elif not detail:
+                detail = failure_detail
+            return {
+                "tone": "error",
+                "eyebrow": "Discovery",
+                "badge": "Blocked",
+                "title": "Automatic discovery is not runnable.",
+                "detail": detail or "Automatic discovery is blocked.",
+            }
+        if status == "zero_yield":
+            return {
+                "tone": "warning",
+                "eyebrow": "Discovery",
+                "badge": "Zero yield",
+                "title": "Discovery ran but found no verified jobs.",
+                "detail": summary or "The latest discovery cycle finished without any verified jobs to show.",
+            }
+        if status == "no_verified_jobs":
+            return {
+                "tone": "info",
+                "eyebrow": "Discovery",
+                "badge": "Idle",
+                "title": "No verified jobs are visible yet.",
+                "detail": summary or "Run discovery again to fetch more jobs.",
+            }
 
     if not search_run:
         return {
@@ -241,11 +314,11 @@ def build_search_state_view_model(
 
 def build_manual_search_feedback(sync_result: dict[str, Any]) -> dict[str, str]:
     surfaced_count = int(sync_result.get("surfaced_count") or 0)
-    if surfaced_count > 0:
-        tone = "success"
-    else:
-        tone = "warning"
+    discovery_summary = str(sync_result.get("discovery_summary") or "").strip()
+    tone = "success" if surfaced_count > 0 else "warning"
     message = f"Refresh finished. Surfaced {surfaced_count} job{'s' if surfaced_count != 1 else ''}."
+    if discovery_summary:
+        message += f" {discovery_summary}"
     return {"tone": tone, "message": message}
 
 
@@ -254,8 +327,14 @@ def render_search_status_region(
     *,
     visible_job_count: int,
     search_meta: dict[str, Any] | None = None,
+    discovery_status: dict[str, Any] | None = None,
 ) -> None:
-    search_state = build_search_state_view_model(search_run, search_meta=search_meta, visible_job_count=visible_job_count)
+    search_state = build_search_state_view_model(
+        search_run,
+        search_meta=search_meta,
+        discovery_status=discovery_status,
+        visible_job_count=visible_job_count,
+    )
     palette = {
         "info": {"background": "#F8FAFC", "border": "#CBD5E1", "accent": "#334155"},
         "success": {"background": "#F0FDF4", "border": "#BBF7D0", "accent": "#166534"},
@@ -319,6 +398,7 @@ def build_jobs_empty_state_view_model(
     total_job_count: int,
     filters: dict[str, Any],
     search_meta: dict[str, Any] | None = None,
+    discovery_status: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     has_filters = bool(filters["search"].strip() or filters["location"].strip() or filters["remote_only"])
     backend_search_active = bool(search_meta and str(search_meta.get("query") or "").strip())
@@ -344,7 +424,12 @@ def build_jobs_empty_state_view_model(
             "show_clear_filters": True,
         }
 
-    search_state = build_search_state_view_model(search_run, search_meta=search_meta, visible_job_count=0)
+    search_state = build_search_state_view_model(
+        search_run,
+        search_meta=search_meta,
+        discovery_status=discovery_status,
+        visible_job_count=0,
+    )
     result_count = int((search_run or {}).get("result_count") or 0)
     if backend_search_active:
         result_count = int(search_meta.get("result_count") or 0)
@@ -373,8 +458,15 @@ def render_jobs_empty_state(
     filters: dict[str, Any],
     page_key: str,
     search_meta: dict[str, Any] | None = None,
+    discovery_status: dict[str, Any] | None = None,
 ) -> None:
-    empty_state = build_jobs_empty_state_view_model(search_run, total_job_count=total_job_count, filters=filters, search_meta=search_meta)
+    empty_state = build_jobs_empty_state_view_model(
+        search_run,
+        total_job_count=total_job_count,
+        filters=filters,
+        search_meta=search_meta,
+        discovery_status=discovery_status,
+    )
     st.markdown(build_jobs_empty_state_markup(empty_state), unsafe_allow_html=True)
     if not empty_state["show_clear_filters"]:
         return
@@ -888,6 +980,7 @@ def render_jobs_screen(
     *,
     leads: list[dict[str, Any]],
     search_run: dict[str, Any] | None = None,
+    discovery_status: dict[str, Any] | None = None,
     search_meta: dict[str, Any] | None = None,
     page_key: str,
     title: str,
@@ -936,7 +1029,12 @@ def render_jobs_screen(
             if message:
                 getattr(st, tone if tone in {"success", "warning", "info", "error"} else "info")(message)
     if title == "Jobs" or (search_meta and str(search_meta.get("query") or "").strip()):
-        render_search_status_region(search_run, visible_job_count=len(filtered_jobs), search_meta=search_meta)
+        render_search_status_region(
+            search_run,
+            visible_job_count=len(filtered_jobs),
+            search_meta=search_meta,
+            discovery_status=discovery_status,
+        )
     elif intro_message:
         st.markdown(build_jobs_intro_state_markup(title=title, intro_message=intro_message), unsafe_allow_html=True)
 
@@ -972,6 +1070,7 @@ def render_jobs_screen(
                     filters=filters,
                     page_key=page_key,
                     search_meta=search_meta,
+                    discovery_status=discovery_status,
                 )
             else:
                 st.markdown(
