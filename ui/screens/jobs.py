@@ -276,6 +276,17 @@ def build_search_state_view_model(
             }
 
         if result_count == 0 or status == "empty":
+            if result_count == 0 and status not in {"empty", "zero_yield"}:
+                return {
+                    "tone": "warning",
+                    "eyebrow": "Search",
+                    "badge": "Needs verification",
+                    "title": "Search returned 0 jobs, but the outcome is not fully verified yet.",
+                    "detail": (
+                        f"Backend search finished for '{query}' across {searched_fields}, but returned 0 jobs. "
+                        "Jorb cannot yet tell whether this is a true zero-yield search or a discovery gap."
+                    ),
+                }
             return {
                 "tone": "warning",
                 "eyebrow": "Search",
@@ -444,6 +455,18 @@ def build_search_state_view_model(
             "badge": "Zero results",
             "title": "Search finished with no matching jobs.",
             "detail": f"The latest run checked {query_count} quer{'y' if query_count == 1 else 'ies'} at {created_label}.",
+        }
+
+    if result_count == 0:
+        return {
+            "tone": "warning",
+            "eyebrow": "Search",
+            "badge": "Needs verification",
+            "title": "Search returned 0 jobs, but the outcome is not fully verified yet.",
+            "detail": (
+                f"The latest run checked {query_count} quer{'y' if query_count == 1 else 'ies'} at {created_label}, "
+                "but Jorb does not yet have explicit zero-yield truth for this result."
+            ),
         }
 
     return {

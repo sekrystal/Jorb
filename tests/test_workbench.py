@@ -1201,9 +1201,29 @@ def test_build_search_state_view_model_requires_zero_yield_truth_for_zero_result
         }
     )
 
-    assert view_model["tone"] == "success"
-    assert view_model["title"] == "Search finished successfully."
-    assert "found 0 jobs across 2 queries" in view_model["detail"]
+    assert view_model["tone"] == "warning"
+    assert view_model["badge"] == "Needs verification"
+    assert view_model["title"] == "Search returned 0 jobs, but the outcome is not fully verified yet."
+    assert "does not yet have explicit zero-yield truth" in view_model["detail"]
+
+
+def test_build_search_state_view_model_marks_backend_search_zero_results_as_needing_verification() -> None:
+    view_model = build_search_state_view_model(
+        None,
+        search_meta={
+            "query": "chief of staff",
+            "status": "results",
+            "result_count": 0,
+            "searched_fields": ["title", "company", "location"],
+            "backend_applied": True,
+        },
+    )
+
+    assert view_model["tone"] == "warning"
+    assert view_model["badge"] == "Needs verification"
+    assert view_model["title"] == "Search returned 0 jobs, but the outcome is not fully verified yet."
+    assert "chief of staff" in view_model["detail"]
+    assert "discovery gap" in view_model["detail"]
 
 
 def test_render_search_status_region_renders_inline_jobs_status(monkeypatch) -> None:
